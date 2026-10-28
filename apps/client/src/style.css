@@ -1,0 +1,183 @@
+:root {
+  --hud-text: #ffffff;
+  --hud-shadow: 0 1px 2px rgba(0, 0, 0, 0.9), 0 0 6px rgba(0, 0, 0, 0.45);
+  --fast: #f0e442;
+  --overlay-bg: rgba(14, 17, 22, 0.62);
+  --card-bg: rgba(24, 28, 35, 0.94);
+  --card-text: #e9edf2;
+  --card-muted: #9aa4b1;
+  --accent: #e69f00;
+  --accent-2: #56b4e9;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: #11141a;
+  color: var(--card-text);
+  font-family: system-ui, 'Segoe UI', Roboto, Arial, sans-serif;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+#app {
+  position: fixed;
+  inset: 0;
+}
+
+#game-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/* ---- HUD ---- */
+.hud {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 5;
+  color: var(--hud-text);
+  text-shadow: var(--hud-shadow);
+  font-variant-numeric: tabular-nums;
+}
+
+.hidden {
+  display: none !important;
+}
+
+.crosshair {
+  position: absolute;
+  left: 0;
+  top: 0;
+  --ch-color: #00ffff;
+}
+.crosshair .arm {
+  position: absolute;
+  background: var(--ch-color);
+}
+.crosshair.outlined .arm {
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.85);
+}
+.hud.paused .crosshair {
+  display: none;
+}
+
+.speedo {
+  position: absolute;
+  left: 50%;
+  bottom: 9%;
+  transform: translateX(-50%);
+  text-align: center;
+  line-height: 1;
+}
+.speedo .speed {
+  font-size: 56px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+}
+.speedo .speed.fast {
+  color: var(--fast);
+}
+.speedo .vspeed,
+.speedo .jumps {
+  margin-top: 6px;
+  font-size: 14px;
+  opacity: 0.85;
+  min-height: 14px;
+}
+
+.corner {
+  position: absolute;
+  left: 10px;
+  top: 8px;
+  font: 12px/1.45 ui-monospace, 'Cascadia Mono', Consolas, monospace;
+}
+.corner .debug {
+  opacity: 0.85;
+  white-space: pre;
+}
+
+/* ---- click-to-play overlay ---- */
+.overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--overlay-bg);
+  cursor: pointer;
+}
+.overlay .card {
+  width: min(440px, calc(100vw - 32px));
+  max-height: calc(100vh - 32px);
+  overflow: auto;
+  box-sizing: border-box;
+  padding: 22px 24px 18px;
+  border-radius: 10px;
+  background: var(--card-bg);
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.45);
+  cursor: default;
+}
+.overlay .title {
+  margin: 0;
+  font-size: 26px;
+  letter-spacing: 0.01em;
+}
+.overlay .subtitle {
+  margin: 2px 0 16px;
+  color: var(--card-muted);
+  font-size: 14px;
+}
+.overlay button {
+  display: block;
+  width: 100%;
+  margin: 0 0 8px;
+  padding: 11px 14px;
+  border: 0;
+  border-radius: 7px;
+  font: 600 15px system-ui, sans-serif;
+  cursor: pointer;
+}
+.overlay button.play {
+  background: var(--accent);
+  color: #1b1400;
+}
+.overlay button.secondary {
+  background: #323946;
+  color: var(--card-text);
+}
+.overlay button:focus-visible {
+  outline: 2px solid var(--accent-2);
+  outline-offset: 2px;
+}
+.overlay .controls {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 5px 14px;
+  margin: 14px 0 0;
+  font-size: 13px;
+}
+.overlay dt {
+  font-weight: 700;
+  color: var(--card-text);
+}
+.overlay dd {
+  margin: 0;
+  color: var(--card-muted);
+}
+.overlay .message {
+  margin: 12px 0 0;
+  min-height: 1em;
+  color: var(--fast);
+  font-size: 13px;
+}
+
+/* ---- dev panel ---- */
+/* lil-gui 0.21 classes are lil-prefixed; it already sits at z-index 1001, above the overlay */
+.lil-gui .lil-controller.tuning-modified .lil-name {
+  color: var(--fast);
+}

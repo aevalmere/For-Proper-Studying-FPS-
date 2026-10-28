@@ -1,0 +1,11 @@
+// Serves the static Vite build as Workers static assets. The game-room Durable
+// Object (step 4) will get its own Worker in apps/server.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "splatcademy",
+  "compatibility_date": "2026-10-20",
+  "assets": {
+    "directory": "./dist",
+    "not_found_handling": "single-page-application"
+  }
+}

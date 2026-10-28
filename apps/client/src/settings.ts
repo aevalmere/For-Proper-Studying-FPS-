@@ -1,0 +1,127 @@
+// Player-facing client settings (not sim tuning). Persisted under `splat.settings`.
+
+export type Quality = 'low' | 'high';
+/** what the mouse wheel does: jump (scroll bhop) or cycle weapons */
+export type WheelMode = 'jump' | 'weapon';
+/** both keys of an axis held: last pressed wins (snappy counter-strafe) or they cancel */
+export type OpposingKeys = 'lastWins' | 'cancel';
+
+export interface ClientSettings {
+  /** CS-style: degrees per mouse count = sensitivity * 0.022 */
+  sensitivity: number;
+  invertY: boolean;
+  /** request unadjusted (raw) mouse movement when locking the pointer */
+  rawInput: boolean;
+  /** CS-style horizontal FOV in degrees, measured at 4:3 */
+  fov: number;
+  quality: Quality;
+  /** create the canvas with `desynchronized` (lower latency, may tear); needs a reload */
+  lowLatency: boolean;
+  wheel: WheelMode;
+  opposingKeys: OpposingKeys;
+  /** Ctrl also crouches, only while fullscreen with the keyboard locked (else Ctrl+W closes the tab) */
+  ctrlCrouch: boolean;
+  crosshairSize: number;
+  crosshairGap: number;
+  crosshairThickness: number;
+  crosshairColor: string;
+  crosshairOutline: boolean;
+  crosshairDot: boolean;
+  /** 0..1 strength of the world-space floor/wall grid */
+  gridStrength: number;
+  showFps: boolean;
+  showDebug: boolean;
+  /** index into the map's teleport list: where R (respawn) puts you */
+  spawnAt: number;
+}
+
+export const SETTINGS_KEY = 'splat.settings';
+
+export const SETTINGS_OPTIONS = {
+  quality: ['low', 'high'] as Quality[],
+  wheel: ['jump', 'weapon'] as WheelMode[],
+  opposingKeys: ['lastWins', 'cancel'] as OpposingKeys[],
+};
+
+export const SETTINGS_RANGES: Partial<Record<keyof ClientSettings, { min: number; max: number; step: number }>> = {
+  sensitivity: { min: 0.1, max: 10, step: 0.01 },
+  fov: { min: 70, max: 120, step: 1 },
+  crosshairSize: { min: 0, max: 24, step: 1 },
+  crosshairGap: { min: 0, max: 16, step: 1 },
+  crosshairThickness: { min: 1, max: 6, step: 1 },
+  gridStrength: { min: 0, max: 1, step: 0.05 },
+};
+
+interface DeviceHints {
+  hardwareConcurrency?: number;
+  deviceMemory?: number;
+  userAgent?: string;
+}
+
+/** Low on anything that looks like a Chromebook-class or mobile device. */
+export function defaultQuality(nav: DeviceHints = typeof navigator === 'undefined' ? {} : navigator): Quality {
+  const cores = nav.hardwareConcurrency ?? 4;
+  const mem = nav.deviceMemory ?? 8;
+  const ua = nav.userAgent ?? '';
+  if (cores <= 4 || mem <= 4 || /CrOS|Android|iPhone|iPad|Mobile/i.test(ua)) return 'low';
+  return 'high';
+}
+
+export function defaultSettings(quality: Quality = defaultQuality()): ClientSettings {
+  return {
+    sensitivity: 1.5,
+    invertY: false,
+    rawInput: true,
+    fov: 90,
+    quality,
+    lowLatency: false,
+    wheel: 'jump',
+    opposingKeys: 'lastWins',
+    ctrlCrouch: true,
+    crosshairSize: 6,
+    crosshairGap: 3,
+    crosshairThickness: 2,
+    crosshairColor: '#00ffff',
+    crosshairOutline: true,
+    crosshairDot: false,
+    gridStrength: 0.6,
+    showFps: true,
+    showDebug: true,
+    spawnAt: 0,
+  };
+}
+
+/** Copy saved values over defaults, keeping only keys whose type (and enum value) is valid. */
+export function mergeSettings(defaults: ClientSettings, saved: unknown): ClientSettings {
+  const out = { ...defaults };
+  if (!saved || typeof saved !== 'object') return out;
+  const src = saved as Record<string, unknown>;
+  const dst = out as unknown as Record<string, unknown>;
+  for (const key of Object.keys(defaults) as (keyof ClientSettings)[]) {
+    const v = src[key];
+    if (typeof v !== typeof defaults[key]) continue;
+    if (typeof v === 'number' && !Number.isFinite(v)) continue;
+    const options = (SETTINGS_OPTIONS as Record<string, readonly string[]>)[key];
+    if (options && !options.includes(v as string)) continue;
+    dst[key] = v;
+  }
+  return out;
+}
+
+export function loadSettings(): ClientSettings {
+  const defaults = defaultSettings();
+  try {
+    const raw = localStorage.getItem(SETTINGS_KEY);
+    return mergeSettings(defaults, raw ? JSON.parse(raw) : null);
+  } catch {
+    return defaults;
+  }
+}
+
+export function saveSettings(s: ClientSettings): void {
+  try {
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(s));
+  } catch {
+    // storage blocked: settings still apply for this session
+  }
+}
