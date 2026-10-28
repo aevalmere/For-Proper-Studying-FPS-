@@ -15,6 +15,13 @@ export interface ClientSettings {
   /** CS-style horizontal FOV in degrees, measured at 4:3 */
   fov: number;
   quality: Quality;
+  /**
+   * 3D resolution as a fraction of the window (0.5..1); the canvas is drawn smaller
+   * and stretched to fit. Fill rate is what limits Chromebook GPUs.
+   */
+  renderScale: number;
+  /** lower the resolution below renderScale while frames miss their budget, restore it when they don't */
+  adaptiveResolution: boolean;
   /** create the canvas with `desynchronized` (lower latency, may tear); needs a reload */
   lowLatency: boolean;
   wheel: WheelMode;
@@ -27,10 +34,14 @@ export interface ClientSettings {
   crosshairColor: string;
   crosshairOutline: boolean;
   crosshairDot: boolean;
+  /** crosshair gap opens with the next shot's spread (stand still to tighten it) */
+  dynamicCrosshair: boolean;
   /** 0..1 strength of the world-space floor/wall grid */
   gridStrength: number;
   showFps: boolean;
   showDebug: boolean;
+  /** frame-time graph with render scale and draw calls (F2) */
+  perfGraph: boolean;
   /** index into the map's teleport list: where R (respawn) puts you */
   spawnAt: number;
 }
@@ -50,7 +61,11 @@ export const SETTINGS_RANGES: Partial<Record<keyof ClientSettings, { min: number
   crosshairGap: { min: 0, max: 16, step: 1 },
   crosshairThickness: { min: 1, max: 6, step: 1 },
   gridStrength: { min: 0, max: 1, step: 0.05 },
+  renderScale: { min: 0.5, max: 1, step: 0.05 },
 };
+
+/** Render scale a new 'low' profile starts at: 0.75 draws 56% of the pixels. */
+export const LOW_RENDER_SCALE = 0.75;
 
 interface DeviceHints {
   hardwareConcurrency?: number;
@@ -74,6 +89,8 @@ export function defaultSettings(quality: Quality = defaultQuality()): ClientSett
     rawInput: true,
     fov: 90,
     quality,
+    renderScale: quality === 'low' ? LOW_RENDER_SCALE : 1,
+    adaptiveResolution: quality === 'low',
     lowLatency: false,
     wheel: 'jump',
     opposingKeys: 'lastWins',
@@ -84,9 +101,11 @@ export function defaultSettings(quality: Quality = defaultQuality()): ClientSett
     crosshairColor: '#00ffff',
     crosshairOutline: true,
     crosshairDot: false,
+    dynamicCrosshair: true,
     gridStrength: 0.6,
     showFps: true,
     showDebug: true,
+    perfGraph: false,
     spawnAt: 0,
   };
 }

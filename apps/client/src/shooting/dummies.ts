@@ -1,19 +1,24 @@
-// Offline target range: graybox dummies at map.dummySpawns, the same size as the
-// player hull, each with a paint meter. Hits fill the meter; a full meter splats the
-// dummy (it turns paint-colored and freezes), and it resets after a few seconds.
+// Offline target range: graybox dummies at map.dummySpawns, each with a paint meter
+// and a number. Hits fill the meter; a full meter splats the dummy (it turns
+// paint-colored and freezes), and it resets after a few seconds.
 //
-// Dummies turn to face the local player. Every dummy except each third one strafes
-// side to side across the player's line of sight; the strafe axis is re-aimed only
-// as the dummy passes its center, so it never jumps. Strafe range is clamped so a
-// dummy can't slide into a wall or a neighbour.
+// Hitbox = mesh: each dummy's HitCapsule comes from playerHitCapsule (the same
+// volume a player will have), and its body mesh and debug wireframe are built from
+// that capsule's radius and height, so what you see is exactly what the balls test.
+// A round body makes facing irrelevant to hits, so dummies keep turning to face
+// you (the visor shows it), and splats are stored on the capsule in root space so
+// they stay where they landed while the body turns.
 //
-// Dummy state is stepped on the fixed tick so the hitboxes the projectile sim sees
-// match where the balls were traced; meshes interpolate between ticks.
+// Every dummy except each third one strafes side to side across the player's line
+// of sight; the strafe axis is re-aimed only as the dummy passes its center, so it
+// never jumps. Strafe range is clamped so a dummy can't slide into a wall or a
+// neighbour. Dummy state is stepped on the fixed tick (hitbox prevPos/pos for the
+// swept test); meshes interpolate between ticks like the balls do.
 
 import * as THREE from 'three';
 import {
   type CollisionWorld,
-  type HitBox,
+  type HitCapsule,
   type MapDef,
   type MovementConfig,
   type Paintable,
@@ -21,27 +26,40 @@ import {
   type Vec3,
   PAINT_FULL,
   applyPaint,
+  createHitCapsule,
   createPlayerState,
-  getHull,
+  emptyTrace,
+  playerHitCapsule,
   traceRay,
   vec3,
 } from '@splat/shared';
 import type { ShootingSettings } from './settings.ts';
 import { SplatDecals } from './splats.ts';
+import { DEBUG_RENDER_ORDER, capsuleWireGeometry, debugLineMaterial } from './debugDraw.ts';
 
 /** Hitbox ids for dummies start here; the local player is id 1. */
 export const DUMMY_ID_BASE = 1000;
 const SPLATS_PER_DUMMY = 24;
 const BODY_COLOR = new THREE.Color(0xd9d3c3);
+const BODY_EMISSIVE = 0.27;
+const FLASH_COLOR = new THREE.Color(0xffffff);
+/** seconds a hit flash lasts */
+const FLASH_TIME = 0.12;
 const METER_WIDTH = 32;
 const METER_HEIGHT = 3;
+/** colored meter fill eases toward the real value at this rate, 1/s */
+const METER_EASE = 9;
 /** how far a wall/room probe reaches, u */
 const ROOM_REACH = 512;
 /** body turn rate toward the player, 1/s */
 const TURN_RATE = 6;
+const SIGNS = [1, -1] as const;
+const PROBE_HEIGHTS = [0.25, 0.75] as const;
 
 interface Dummy {
   id: number;
+  /** shown in the HUD notice and on the badge: "Dummy 3" */
+  name: string;
   base: Vec3;
   /** horizontal unit vector the dummy strafes along */
   axis: Vec3;
@@ -52,36 +70,39 @@ interface Dummy {
   dir: number;
   strafes: boolean;
   meter: Paintable;
+  /** fill drawn in paint color, eased toward meter.paint so each hit's chunk shows */
+  shownFill: number;
   paintColor: THREE.Color;
   resetTimer: number;
   flash: number;
-  hitbox: HitBox;
+  /** meter pop on hit, 1 → 0 */
+  bump: number;
+  hitbox: HitCapsule;
   root: THREE.Group;
   body: THREE.Group;
   bodyMat: THREE.MeshLambertMaterial;
   splats: SplatDecals;
   meterFill: THREE.Mesh;
   meterFillMat: THREE.MeshBasicMaterial;
+  meterChunk: THREE.Mesh;
   meterGroup: THREE.Group;
   label: THREE.Sprite;
-  /** capsule radius and height, for snapping splats onto the body */
-  radius: number;
-  height: number;
+  wire: THREE.LineSegments;
 }
 
-function makeLabelTexture(): THREE.CanvasTexture {
+function textTexture(text: string, w: number, h: number, font: string): THREE.CanvasTexture {
   const c = document.createElement('canvas');
-  c.width = 256;
-  c.height = 64;
+  c.width = w;
+  c.height = h;
   const g = c.getContext('2d')!;
-  g.font = 'bold 44px system-ui, sans-serif';
+  g.font = font;
   g.textAlign = 'center';
   g.textBaseline = 'middle';
-  g.lineWidth = 8;
+  g.lineWidth = Math.max(4, h / 8);
   g.strokeStyle = '#1b1530';
-  g.strokeText('SPLATTED!', 128, 34);
+  g.strokeText(text, w / 2, h / 2 + 2);
   g.fillStyle = '#ffffff';
-  g.fillText('SPLATTED!', 128, 34);
+  g.fillText(text, w / 2, h / 2 + 2);
   const tex = new THREE.CanvasTexture(c);
   tex.colorSpace = THREE.SRGBColorSpace;
   return tex;
@@ -95,38 +116,43 @@ function angleDelta(a: number, b: number): number {
   return d;
 }
 
-const tmpLocal = new THREE.Vector3();
 const tmpN = new THREE.Vector3();
-const invQuat = new THREE.Quaternion();
+const tmpPoint = { x: 0, y: 0, z: 0 };
 const lerpColor = new THREE.Color();
 const camPos = new THREE.Vector3();
 const probeStart = vec3();
 const probeEnd = vec3();
+const probe = emptyTrace();
 
 export class TargetRange {
-  readonly hitboxes: HitBox[] = [];
+  readonly hitboxes: HitCapsule[] = [];
   readonly group = new THREE.Group();
   private readonly dummies: Dummy[] = [];
   private readonly settings: ShootingSettings;
   private readonly world: CollisionWorld;
   private readonly disposables: { dispose(): void }[] = [];
+  private time = 0;
+  private wiresShown = false;
 
   constructor(map: MapDef, world: CollisionWorld, movement: MovementConfig, settings: ShootingSettings, viewer: Vec3) {
     this.settings = settings;
     this.world = world;
-    const labelTex = makeLabelTexture();
+    const labelTex = textTexture('SPLATTED!', 256, 64, 'bold 44px system-ui, sans-serif');
     const labelMat = new THREE.SpriteMaterial({ map: labelTex, depthWrite: false });
     const meterBgMat = new THREE.MeshBasicMaterial({ color: 0x1b1530 });
+    const meterChunkMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
     const baseMat = new THREE.MeshLambertMaterial({ color: 0x5b5f6b, emissive: 0x1d1f24 });
     const visorMat = new THREE.MeshLambertMaterial({ color: 0x2b2f3a, emissive: 0x15171c });
+    const wireMat = debugLineMaterial(0x39ff88);
     const meterBgGeom = new THREE.PlaneGeometry(METER_WIDTH + 2, METER_HEIGHT + 2);
     const meterFillGeom = new THREE.PlaneGeometry(METER_WIDTH, METER_HEIGHT).translate(METER_WIDTH / 2, 0, 0);
-    this.disposables.push(labelTex, labelMat, meterBgMat, baseMat, visorMat, meterBgGeom, meterFillGeom);
+    this.disposables.push(labelTex, labelMat, meterBgMat, meterChunkMat, baseMat, visorMat, wireMat, meterBgGeom, meterFillGeom);
 
     map.dummySpawns.forEach((pos, i) => {
-      const hull = getHull(createPlayerState(pos), movement);
-      const height = hull.maxs.y - hull.mins.y;
-      const radius = Math.min(hull.maxs.x - hull.mins.x, hull.maxs.z - hull.mins.z) / 2;
+      const id = DUMMY_ID_BASE + i;
+      const name = `Dummy ${i + 1}`;
+      const hitbox = playerHitCapsule(createHitCapsule(id, pos, 0, 0), createPlayerState(pos), movement);
+      const { radius, height } = hitbox;
 
       const root = new THREE.Group();
       root.position.set(pos.x, pos.y, pos.z);
@@ -134,8 +160,10 @@ export class TargetRange {
       body.rotation.y = Math.atan2(viewer.x - pos.x, viewer.z - pos.z);
       root.add(body);
 
+      // the body is the hitbox: same radius, same height, same clamping
+      const core = Math.min(radius, height / 2);
       const bodyMat = new THREE.MeshLambertMaterial({ color: BODY_COLOR.clone(), emissive: new THREE.Color(0x3a3833) });
-      const capsuleGeom = new THREE.CapsuleGeometry(radius, Math.max(0, height - radius * 2), 6, 18);
+      const capsuleGeom = new THREE.CapsuleGeometry(core, Math.max(0, height - core * 2), 6, 18);
       const capsule = new THREE.Mesh(capsuleGeom, bodyMat);
       capsule.position.y = height / 2;
       capsule.castShadow = true; // only matters when the 'high' quality preset enables shadows
@@ -144,7 +172,7 @@ export class TargetRange {
       const baseGeom = new THREE.CylinderGeometry(radius + 4, radius + 6, 2, 20);
       const stand = new THREE.Mesh(baseGeom, baseMat);
       stand.position.y = 1;
-      body.add(stand);
+      root.add(stand);
 
       // visor on the front (+Z in body space) so you can tell which way it faces
       const visorGeom = new THREE.BoxGeometry(radius * 1.1, 5, 4);
@@ -152,17 +180,27 @@ export class TargetRange {
       visor.position.set(0, height - radius * 0.9, radius - 1.2);
       body.add(visor);
 
+      // splats live on the capsule in root space: the capsule is round, so turning the body doesn't move its surface
       const splats = new SplatDecals(SPLATS_PER_DUMMY, SPLATS_PER_DUMMY, 0.15);
-      body.add(splats.group);
+      root.add(splats.group);
 
       const meterGroup = new THREE.Group();
       meterGroup.position.y = height + 10;
       const meterBg = new THREE.Mesh(meterBgGeom, meterBgMat);
+      const meterChunk = new THREE.Mesh(meterFillGeom, meterChunkMat);
+      meterChunk.position.set(-METER_WIDTH / 2, 0, 0.04);
+      meterChunk.scale.x = 0.0001;
       const meterFillMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
       const meterFill = new THREE.Mesh(meterFillGeom, meterFillMat);
-      meterFill.position.set(-METER_WIDTH / 2, 0, 0.05);
+      meterFill.position.set(-METER_WIDTH / 2, 0, 0.08);
       meterFill.scale.x = 0.0001;
-      meterGroup.add(meterBg, meterFill);
+      // number badge left of the meter, matching the "Splatted Dummy 3!" notice
+      const badgeTex = textTexture(String(i + 1), 64, 64, 'bold 46px system-ui, sans-serif');
+      const badgeMat = new THREE.SpriteMaterial({ map: badgeTex, depthWrite: false });
+      const badge = new THREE.Sprite(badgeMat);
+      badge.scale.set(9, 9, 1);
+      badge.position.set(-METER_WIDTH / 2 - 7, 0, 0);
+      meterGroup.add(meterBg, meterChunk, meterFill, badge);
       root.add(meterGroup);
 
       const label = new THREE.Sprite(labelMat);
@@ -171,11 +209,18 @@ export class TargetRange {
       label.visible = false;
       root.add(label);
 
+      const wireGeom = capsuleWireGeometry(radius, height);
+      const wire = new THREE.LineSegments(wireGeom, wireMat);
+      wire.renderOrder = DEBUG_RENDER_ORDER;
+      wire.visible = false;
+      root.add(wire);
+
       this.group.add(root);
-      this.disposables.push(capsuleGeom, baseGeom, visorGeom, bodyMat, meterFillMat, splats);
+      this.disposables.push(capsuleGeom, baseGeom, visorGeom, bodyMat, meterFillMat, badgeTex, badgeMat, wireGeom, splats);
 
       const d: Dummy = {
-        id: DUMMY_ID_BASE + i,
+        id,
+        name,
         base: vec3(pos.x, pos.y, pos.z),
         axis: vec3(1, 0, 0),
         room: 0,
@@ -184,25 +229,32 @@ export class TargetRange {
         dir: i % 2 === 0 ? 1 : -1,
         strafes: i % 3 !== 0,
         meter: { paint: 0, splatted: false },
+        shownFill: 0,
         paintColor: new THREE.Color(0xffffff),
         resetTimer: 0,
         flash: 0,
-        hitbox: { id: DUMMY_ID_BASE + i, pos: vec3(pos.x, pos.y, pos.z), mins: hull.mins, maxs: hull.maxs },
+        bump: 0,
+        hitbox,
         root,
         body,
         bodyMat,
         splats,
         meterFill,
         meterFillMat,
+        meterChunk,
         meterGroup,
         label,
-        radius,
-        height,
+        wire,
       };
       this.dummies.push(d);
       this.hitboxes.push(d.hitbox);
     });
     for (const d of this.dummies) this.aim(d, viewer);
+  }
+
+  /** "Dummy 3" for a hitbox id, or '' if it isn't a dummy. */
+  nameOf(id: number): string {
+    return this.dummies[id - DUMMY_ID_BASE]?.name ?? '';
   }
 
   /** Point the strafe axis across the line from the dummy to `viewer`, and re-measure room. */
@@ -228,18 +280,20 @@ export class TargetRange {
   private measureRoom(d: Dummy): number {
     const p = d.base;
     const a = d.axis;
-    const width = d.radius * 2;
+    const r = d.hitbox.radius;
+    const width = r * 2;
     let room = ROOM_REACH;
-    for (const sign of [1, -1]) {
-      for (const h of [d.height * 0.25, d.height * 0.75]) {
+    for (const sign of SIGNS) {
+      for (const k of PROBE_HEIGHTS) {
+        const h = d.hitbox.height * k;
         probeStart.x = p.x;
         probeStart.y = p.y + h;
         probeStart.z = p.z;
         probeEnd.x = p.x + a.x * ROOM_REACH * sign;
         probeEnd.y = p.y + h;
         probeEnd.z = p.z + a.z * ROOM_REACH * sign;
-        const tr = traceRay(this.world, probeStart, probeEnd);
-        room = Math.min(room, tr.fraction * ROOM_REACH - d.radius - 4);
+        traceRay(this.world, probeStart, probeEnd, probe);
+        room = Math.min(room, probe.fraction * ROOM_REACH - r - 4);
       }
     }
     for (const o of this.dummies) {
@@ -281,33 +335,41 @@ export class TargetRange {
         d.offset = 0;
         d.prevOffset = 0;
       }
-      d.hitbox.pos.x = d.base.x + d.axis.x * d.offset;
-      d.hitbox.pos.y = d.base.y;
-      d.hitbox.pos.z = d.base.z + d.axis.z * d.offset;
+      const hb = d.hitbox;
+      hb.prevPos.x = hb.pos.x;
+      hb.prevPos.y = hb.pos.y;
+      hb.prevPos.z = hb.pos.z;
+      hb.pos.x = d.base.x + d.axis.x * d.offset;
+      hb.pos.y = d.base.y;
+      hb.pos.z = d.base.z + d.axis.z * d.offset;
     }
   }
 
   /** Apply a projectile's target hit. Returns 'splatted' when this hit filled the meter. */
   onHit(hit: ProjectileHit, color: THREE.Color): 'hit' | 'splatted' | null {
-    const d = this.dummies.find((x) => x.id === hit.target);
-    if (!d) return null;
-    d.flash = 0.08;
+    const d = this.dummies[hit.target - DUMMY_ID_BASE];
+    if (!d || d.id !== hit.target) return null;
+    d.flash = FLASH_TIME;
+    d.bump = 1;
     if (!d.meter.splatted) d.paintColor.copy(color);
     const filled = applyPaint(d.meter, hit.projectile.paint);
     if (filled) d.resetTimer = this.settings.dummyResetSeconds;
 
-    // put a small splat on the body: hit point into body space, snapped to the capsule
-    tmpLocal.set(hit.point.x - d.hitbox.pos.x, hit.point.y - d.hitbox.pos.y, hit.point.z - d.hitbox.pos.z);
-    invQuat.copy(d.body.quaternion).invert();
-    tmpLocal.applyQuaternion(invQuat);
-    const r = d.radius;
-    const cy = Math.min(Math.max(tmpLocal.y, r), d.height - r);
-    tmpN.set(tmpLocal.x, tmpLocal.y - cy, tmpLocal.z);
-    if (tmpN.lengthSq() < 1e-6) tmpN.set(hit.normal.x, hit.normal.y, hit.normal.z).applyQuaternion(invQuat);
+    // a small splat on the body: the contact point relative to the feet, snapped onto the capsule
+    const hb = d.hitbox;
+    const core = Math.min(hb.radius, hb.height / 2);
+    const lx = hit.point.x - hb.pos.x;
+    const ly = hit.point.y - hb.pos.y;
+    const lz = hit.point.z - hb.pos.z;
+    const cy = Math.min(Math.max(ly, core), hb.height - core);
+    tmpN.set(lx, ly - cy, lz);
+    if (tmpN.lengthSq() < 1e-6) tmpN.set(hit.normal.x, hit.normal.y, hit.normal.z);
     tmpN.normalize();
-    const point = { x: tmpN.x * r, y: cy + tmpN.y * r, z: tmpN.z * r };
-    const size = Math.min(hit.projectile.splatRadius * 0.6, r * 0.7);
-    d.splats.add(point, tmpN, size, color, hit.projectile.id);
+    tmpPoint.x = tmpN.x * core;
+    tmpPoint.y = cy + tmpN.y * core;
+    tmpPoint.z = tmpN.z * core;
+    const size = Math.min(hit.projectile.splatRadius * 0.6, core * 0.7);
+    d.splats.add(tmpPoint, tmpN, size, color, hit.projectile.id);
     return filled ? 'splatted' : 'hit';
   }
 
@@ -315,6 +377,7 @@ export class TargetRange {
     d.meter.paint = 0;
     d.meter.splatted = false;
     d.resetTimer = 0;
+    d.shownFill = 0;
     d.splats.clear();
   }
 
@@ -326,11 +389,16 @@ export class TargetRange {
     }
   }
 
-  render(alpha: number, frameDt: number, camera: THREE.Camera): void {
+  render(alpha: number, frameDt: number, camera: THREE.Camera, showHitboxes: boolean): void {
+    this.time += frameDt;
     camera.getWorldPosition(camPos);
     const turn = 1 - Math.exp(-TURN_RATE * frameDt);
-    const pulse = 1 + 0.08 * Math.sin(performance.now() * 0.012);
+    const ease = 1 - Math.exp(-METER_EASE * frameDt);
+    const pulse = 1 + 0.08 * Math.sin(this.time * 12);
+    const wires = showHitboxes !== this.wiresShown;
+    this.wiresShown = showHitboxes;
     for (const d of this.dummies) {
+      if (wires) d.wire.visible = showHitboxes;
       const off = d.prevOffset + (d.offset - d.prevOffset) * alpha;
       d.root.position.set(d.base.x + d.axis.x * off, d.base.y, d.base.z + d.axis.z * off);
       d.meterGroup.quaternion.copy(camera.quaternion);
@@ -339,11 +407,19 @@ export class TargetRange {
         d.body.rotation.y += angleDelta(d.body.rotation.y, want) * turn;
       }
 
+      // meter: the white chunk jumps to the new value, the paint color catches up
       const fill = d.meter.paint / PAINT_FULL;
-      d.meterFill.scale.x = Math.max(0.0001, fill);
+      d.shownFill += (fill - d.shownFill) * ease;
+      if (fill - d.shownFill < 0.002) d.shownFill = fill;
+      d.meterChunk.scale.x = Math.max(0.0001, fill);
+      d.meterFill.scale.x = Math.max(0.0001, d.shownFill);
       d.meterFillMat.color.copy(d.paintColor);
+      d.bump = Math.max(0, d.bump - frameDt * 7);
+      const pop = 1 + 0.3 * d.bump * d.bump;
+      d.meterGroup.scale.set(pop, pop, 1);
 
       d.flash = Math.max(0, d.flash - frameDt);
+      const flash = d.flash / FLASH_TIME;
       if (d.meter.splatted) {
         d.bodyMat.color.copy(d.paintColor);
         d.bodyMat.emissive.copy(d.paintColor).multiplyScalar(0.45);
@@ -352,9 +428,10 @@ export class TargetRange {
       } else {
         lerpColor.copy(BODY_COLOR).lerp(d.paintColor, fill * 0.55);
         d.bodyMat.color.copy(lerpColor);
-        d.bodyMat.emissive.copy(lerpColor).multiplyScalar(d.flash > 0 ? 0.7 : 0.27);
+        d.bodyMat.emissive.copy(lerpColor).multiplyScalar(BODY_EMISSIVE);
         d.label.visible = false;
       }
+      if (flash > 0) d.bodyMat.emissive.lerp(FLASH_COLOR, 0.75 * flash);
     }
   }
 

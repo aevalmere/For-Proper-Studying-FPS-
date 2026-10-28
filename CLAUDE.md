@@ -20,6 +20,7 @@ Run from the repo root. pnpm comes from corepack (`packageManager` in `package.j
 - `pnpm typecheck`: `tsc` per package (TypeScript 7, `noEmit`)
 - `pnpm --filter @splat/client build`: production client bundle
 - `pnpm --filter @splat/client run deploy`: build and deploy the client to Cloudflare (`apps/client/wrangler.jsonc`; needs `wrangler login`). After a build, `pnpm --filter @splat/client exec wrangler deploy --dry-run` validates the config without deploying.
+- `node apps/client/bench/run.mjs --throttle 4,6 --repeat 3`: headless perf benchmark against `apps/client/dist` (build first; uses a system Playwright install). Results are noisy on laptops, so compare medians of repeats. In a browser, `?bench=1` runs the same scripted route and prints JSON.
 - New dependencies with install scripts are blocked by pnpm until approved: `pnpm approve-builds <pkg>` (records them under `allowBuilds` in `pnpm-workspace.yaml`).
 
 There is no linter yet.
@@ -38,6 +39,8 @@ Conventions that span files:
 - **Fixed tick:** simulation runs at 64 Hz (`TICK_DT`). Sim code must be deterministic: no `Math.random`, `Date`, or `performance.now`. Randomness comes from a seeded PRNG passed in, so the server can replay the same `UserCmd`s.
 - **Sim state is plain data** (numbers, booleans, `{x,y,z}` objects) so it can be network-synced. Vector helpers write into an `out` argument to avoid per-tick allocation.
 - **Collision:** the map is convex brushes (`box`, `ramp`) compiled to planes. `traceBox` follows Quake 3's `CM_TraceThroughBrush` (planes pushed out by the box extents); `traceRay` is the zero-size case.
+- **Hitboxes:** players move with an AABB hull against the world, but projectiles hit players and dummies as vertical capsules (`HitCapsule` in `shared/src/projectile.ts`), swept over the target's motion during the tick. Balls hit the world as rays (their center) and hit targets as spheres. Rendered ball size equals hit radius, and dummy meshes are built from the same capsule numbers. Keep visuals and hit volumes generated from one source.
+- **Performance:** frame time on low-end hardware is dominated by per-draw-call cost in `renderer.render`, so prefer merged or instanced meshes over extra objects. Keep per-tick and per-frame paths allocation-free, and write DOM HUD values only when they change.
 - **Client loop:** each tick samples a `UserCmd`, then runs `stepPlayer`, then `system.fixedUpdate`. Each frame applies mouse look directly (not interpolated), interpolates the camera position between the previous and current tick, adds `viewPunch`, then runs `system.render(alpha)`.
 - **Tuning:** tunables are top-level number/boolean fields with a matching `*_META` range table. `addTunables` (`apps/client/src/dev/tuning.ts`) builds lil-gui controls, persists to localStorage under `splat.*` keys, and offers "copy JSON" for pasting values back into presets. Saved localStorage values override code defaults, so use "reset to default" after changing a preset in code.
 

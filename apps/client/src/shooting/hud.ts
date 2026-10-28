@@ -1,6 +1,11 @@
-// Shooting HUD: a DOM panel (marker, ammo, spray/spread readouts) and a 2D canvas
-// overlay for the spray-pattern debug view, recent impacts, and hit feedback.
-// The crosshair itself belongs to the client core.
+// Shooting HUD:
+// - a DOM panel (marker, ammo, spray/spread readouts), rebuilt only when a value changes
+// - a hitmarker on the crosshair (its own element; the crosshair belongs to the
+//   client core) with a bigger paint-colored variant when a hit splats the target
+// - a "Splatted Dummy 3!" notice under the crosshair
+// - a 2D canvas overlay for the spray-pattern and recent-impact debug views, only
+//   sized and drawn while one of those is switched on
+// Feedback elements animate through opacity/transform only, so they never trigger layout.
 
 import * as THREE from 'three';
 import { LOADOUT, type Vec3, type WeaponDef, type WeaponId } from '@splat/shared';
@@ -22,7 +27,30 @@ const CSS = `
 .splat-shoot-slots span.on { background: rgba(255,255,255,0.22); }
 .splat-shoot-debug { margin-top: 4px; font: 500 12px/1.3 ui-monospace, monospace; opacity: 0.8; }
 .splat-shoot-overlay { position: fixed; pointer-events: none; }
+.splat-hitmarker {
+  position: absolute; left: 50%; top: 50%; width: 0; height: 0;
+  pointer-events: none; opacity: 0; --hm-color: #ffffff; --hm-gap: 7px;
+}
+.splat-hm-tick {
+  position: absolute; left: -1.25px; top: 0; width: 2.5px; height: 8px;
+  background: var(--hm-color); border-radius: 2px;
+  box-shadow: 0 0 0 1px rgba(20, 16, 40, 0.75);
+  transform-origin: 50% 0;
+}
+.splat-hitmarker.big { --hm-gap: 9px; }
+.splat-hitmarker.big .splat-hm-tick { left: -2px; width: 4px; height: 13px; }
+.splat-notice {
+  position: absolute; left: 50%; top: 50%; margin-top: 46px;
+  transform: translateX(-50%); white-space: nowrap; pointer-events: none; opacity: 0;
+  font: 800 24px/1 system-ui, sans-serif; letter-spacing: 0.02em;
+  -webkit-text-stroke: 5px #1b1530; paint-order: stroke fill;
+}
 `;
+
+const HIT_TIME = 0.16;
+const SPLAT_MARK_TIME = 0.42;
+const NOTICE_TIME = 1.4;
+const TICK_ANGLES = [45, 135, 225, 315] as const;
 
 interface Impact {
   pos: THREE.Vector3;
@@ -36,7 +64,7 @@ export interface HudState {
   infiniteAmmo: boolean;
   /** index of the next shot */
   sprayIndex: number;
-  /** spread the next shot would get, deg */
+  /** cone the next shot's balls land in, deg */
   spreadDeg: number;
 }
 
@@ -53,7 +81,6 @@ export interface OverlayState {
 
 const tmpV = new THREE.Vector3();
 const DEG = Math.PI / 180;
-const DIAGONALS = [[1, 1], [1, -1], [-1, 1], [-1, -1]] as const;
 
 export class ShootingHud {
   private readonly panel: HTMLDivElement;
@@ -61,15 +88,25 @@ export class ShootingHud {
   private readonly ammoEl: HTMLDivElement;
   private readonly slotsEl: HTMLDivElement;
   private readonly debugEl: HTMLDivElement;
+  private readonly marker: HTMLDivElement;
+  private readonly notice: HTMLDivElement;
   private readonly canvas: HTMLCanvasElement;
   private readonly g: CanvasRenderingContext2D;
   private readonly target: HTMLCanvasElement;
   private readonly impacts: Impact[] = [];
   private impactCursor = 0;
-  private hitTimer = 0;
-  private splatTimer = 0;
-  private splatColor = '#ffffff';
-  private last = { name: '', ammo: '', slots: '', debug: '' };
+  private markTimer = 0;
+  private markTime = HIT_TIME;
+  private markBig = false;
+  private noticeTimer = 0;
+  private overlayOn = false;
+  // last panel inputs, so strings are only rebuilt on change
+  private lastActive: WeaponId | null = null;
+  private lastAmmo = -1;
+  private lastInfinite: boolean | null = null;
+  private lastIndex = -1;
+  private lastSpread = -1;
+  private lastBall = -1;
   private width = 0;
   private height = 0;
 
@@ -89,8 +126,23 @@ export class ShootingHud {
     this.debugEl = this.child('splat-shoot-debug');
     hudRoot.appendChild(this.panel);
 
+    this.marker = document.createElement('div');
+    this.marker.className = 'splat-hitmarker';
+    for (const a of TICK_ANGLES) {
+      const t = document.createElement('div');
+      t.className = 'splat-hm-tick';
+      t.style.transform = `rotate(${a}deg) translateY(var(--hm-gap))`;
+      this.marker.appendChild(t);
+    }
+    hudRoot.appendChild(this.marker);
+
+    this.notice = document.createElement('div');
+    this.notice.className = 'splat-notice';
+    hudRoot.appendChild(this.notice);
+
     this.canvas = document.createElement('canvas');
     this.canvas.className = 'splat-shoot-overlay';
+    this.canvas.style.display = 'none';
     this.g = this.canvas.getContext('2d')!;
     hudRoot.appendChild(this.canvas);
   }
@@ -126,25 +178,72 @@ export class ShootingHud {
     this.impactCursor = 0;
   }
 
+  /** Our ball hit a target: white hitmarker (unless a splat marker is still showing). */
   onTargetHit(): void {
-    this.hitTimer = 0.18;
+    if (this.markBig && this.markTimer > HIT_TIME) return;
+    this.setMarker(false, '#ffffff');
+    this.markTime = this.markTimer = HIT_TIME;
   }
 
-  onSplatted(color: string): void {
-    this.splatTimer = 1.1;
-    this.splatColor = color;
+  /** Our hit filled a target's meter: big paint-colored hitmarker and the notice. */
+  onSplatted(color: string, targetName: string): void {
+    this.setMarker(true, color);
+    this.markTime = this.markTimer = SPLAT_MARK_TIME;
+    this.notice.textContent = targetName ? `Splatted ${targetName}!` : 'Splatted!';
+    this.notice.style.color = color;
+    this.noticeTimer = NOTICE_TIME;
+  }
+
+  private setMarker(big: boolean, color: string): void {
+    if (big !== this.markBig) {
+      this.marker.classList.toggle('big', big);
+      this.markBig = big;
+    }
+    this.marker.style.setProperty('--hm-color', color);
   }
 
   updatePanel(s: HudState, defs: Record<WeaponId, WeaponDef>): void {
-    const name = s.def.name.toUpperCase();
-    const ammo = s.infiniteAmmo ? `∞<small> / ${s.def.stats.hopperSize}</small>` : `${s.ammo}<small> / ${s.def.stats.hopperSize}</small>`;
-    const slots = LOADOUT.map((id, i) => `<span class="${id === s.active ? 'on' : ''}">${i + 1} ${defs[id].name}</span>`).join('');
-    const debug = `spray idx ${s.sprayIndex} · spread ${s.spreadDeg.toFixed(2)}°`;
-    if (name !== this.last.name) this.nameEl.textContent = this.last.name = name;
-    if (ammo !== this.last.ammo) this.ammoEl.innerHTML = this.last.ammo = ammo;
-    if (slots !== this.last.slots) this.slotsEl.innerHTML = this.last.slots = slots;
-    if (debug !== this.last.debug) this.debugEl.textContent = this.last.debug = debug;
-    this.nameEl.style.color = s.def.paintColor;
+    const st = s.def.stats;
+    if (s.active !== this.lastActive) {
+      this.nameEl.textContent = s.def.name.toUpperCase();
+      this.nameEl.style.color = s.def.paintColor;
+      this.slotsEl.innerHTML = LOADOUT.map((id, i) => `<span class="${id === s.active ? 'on' : ''}">${i + 1} ${defs[id].name}</span>`).join('');
+    }
+    if (s.active !== this.lastActive || s.ammo !== this.lastAmmo || s.infiniteAmmo !== this.lastInfinite) {
+      this.ammoEl.innerHTML = `${s.infiniteAmmo ? '∞' : s.ammo}<small> / ${st.hopperSize}</small>`;
+      this.lastAmmo = s.ammo;
+      this.lastInfinite = s.infiniteAmmo;
+    }
+    const spread = Math.round(s.spreadDeg * 100);
+    const ball = Math.round(st.ballRadius * 100) * 1000 + Math.round(st.hitRadiusBonus * 100);
+    if (s.active !== this.lastActive || s.sprayIndex !== this.lastIndex || spread !== this.lastSpread || ball !== this.lastBall) {
+      const bonus = st.hitRadiusBonus > 0 ? ` +${st.hitRadiusBonus.toFixed(2)}` : '';
+      this.debugEl.textContent = `spray idx ${s.sprayIndex} · cone ${(spread / 100).toFixed(2)}° · ball r ${st.ballRadius.toFixed(2)}${bonus}`;
+      this.lastIndex = s.sprayIndex;
+      this.lastSpread = spread;
+      this.lastBall = ball;
+    }
+    this.lastActive = s.active;
+  }
+
+  /** Animate the hitmarker and the notice; call once per frame. */
+  updateFeedback(frameDt: number): void {
+    if (this.markTimer > 0) {
+      this.markTimer = Math.max(0, this.markTimer - frameDt);
+      const k = this.markTimer / this.markTime; // 1 → 0
+      const a = Math.min(1, k * 2.2);
+      const scale = this.markBig ? 1 + 0.45 * k * k : 1 + 0.3 * k * k;
+      this.marker.style.opacity = a.toFixed(3);
+      this.marker.style.transform = `scale(${scale.toFixed(3)})`;
+    }
+    if (this.noticeTimer > 0) {
+      this.noticeTimer = Math.max(0, this.noticeTimer - frameDt);
+      const age = NOTICE_TIME - this.noticeTimer;
+      const a = Math.min(1, this.noticeTimer / 0.35);
+      const pop = age < 0.12 ? 1.25 - (age / 0.12) * 0.25 : 1;
+      this.notice.style.opacity = a.toFixed(3);
+      this.notice.style.transform = `translateX(-50%) scale(${pop.toFixed(3)})`;
+    }
   }
 
   private fit(): void {
@@ -163,18 +262,17 @@ export class ShootingHud {
     }
   }
 
-  drawOverlay(s: OverlayState, camera: THREE.PerspectiveCamera, frameDt: number): void {
-    this.hitTimer = Math.max(0, this.hitTimer - frameDt);
-    this.splatTimer = Math.max(0, this.splatTimer - frameDt);
-    const active = s.showPattern || (s.showImpacts && this.impacts.length > 0) || this.hitTimer > 0 || this.splatTimer > 0;
-    if (!active) {
-      if (this.width > 0) {
-        this.g.clearRect(0, 0, this.width, this.height);
-        this.width = this.height = 0;
-        this.canvas.width = this.canvas.height = 0;
+  drawOverlay(s: OverlayState, camera: THREE.PerspectiveCamera): void {
+    const active = s.showPattern || (s.showImpacts && this.impacts.length > 0);
+    if (active !== this.overlayOn) {
+      this.overlayOn = active;
+      this.canvas.style.display = active ? '' : 'none';
+      if (!active && this.width > 0) {
+        // free the full-screen backing store while the debug views are off
+        this.canvas.width = this.canvas.height = this.width = this.height = 0;
       }
-      return;
     }
+    if (!active) return;
     this.fit();
     const g = this.g;
     const w = this.width;
@@ -188,38 +286,6 @@ export class ShootingHud {
 
     if (s.showPattern) this.drawPattern(s, cx, cy, focal, scale);
     if (s.showImpacts) this.drawImpacts(camera, w, h, scale);
-
-    if (this.hitTimer > 0) {
-      const a = this.hitTimer / 0.18;
-      const gap = 7 * scale;
-      const len = 7 * scale;
-      g.lineCap = 'round';
-      for (const [lw, color] of [[4, `rgba(20,16,40,${0.6 * a})`], [2, `rgba(255,255,255,${a})`]] as const) {
-        g.lineWidth = lw * scale;
-        g.strokeStyle = color;
-        g.beginPath();
-        for (const [dx, dy] of DIAGONALS) {
-          g.moveTo(cx + dx * gap, cy + dy * gap);
-          g.lineTo(cx + dx * (gap + len), cy + dy * (gap + len));
-        }
-        g.stroke();
-      }
-    }
-
-    if (this.splatTimer > 0) {
-      const a = Math.min(1, this.splatTimer / 0.3);
-      g.globalAlpha = a;
-      g.font = `800 ${Math.round(26 * scale)}px system-ui, sans-serif`;
-      g.textAlign = 'center';
-      g.textBaseline = 'middle';
-      g.lineWidth = 6 * scale;
-      g.strokeStyle = '#1b1530';
-      const y = cy + 54 * scale;
-      g.strokeText('SPLATTED!', cx, y);
-      g.fillStyle = this.splatColor;
-      g.fillText('SPLATTED!', cx, y);
-      g.globalAlpha = 1;
-    }
   }
 
   /**
@@ -304,6 +370,8 @@ export class ShootingHud {
 
   dispose(): void {
     this.panel.remove();
+    this.marker.remove();
+    this.notice.remove();
     this.canvas.remove();
     document.getElementById(STYLE_ID)?.remove();
   }

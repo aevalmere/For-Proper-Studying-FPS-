@@ -1,6 +1,14 @@
 // Plain-DOM HUD: crosshair, speedometer, FPS, debug line, and the click-to-play
-// overlay. Text is only written when it changes, to keep per-frame DOM work tiny.
+// overlay.
+//
+// Per-frame DOM work is kept tiny because every text change makes the browser
+// re-lay-out and re-raster part of the page, and the bench trace showed the main
+// thread waiting on that raster: text goes into Text nodes and is written only when
+// it changes, readouts refresh at most READOUT_HZ, the crosshair gap moves with
+// compositor-only transforms, and nothing here reads layout per frame (the viewport
+// size is cached on resize).
 
+import { DEG2RAD } from '@splat/shared';
 import type { ClientSettings } from '../settings.ts';
 
 export interface HudFrame {
@@ -11,6 +19,37 @@ export interface HudFrame {
   /** speed at the last takeoff / landing (0 = none yet) */
   takeoffSpeed: number;
   landSpeed: number;
+  /** cone half-angle of the next shot, degrees (ctx.aimSpreadDeg) */
+  spreadDeg: number;
+  /** camera vertical FOV, degrees */
+  fovDeg: number;
+  /** frame time, s */
+  dt: number;
+  /** performance.now() of this frame */
+  now: number;
+}
+
+/** Numeric readouts refresh at most this often: plenty to read, half the re-raster at 60 fps. */
+export const READOUT_HZ = 30;
+/** Dynamic crosshair easing, 1/s: opens fast so moving reads at once, closes smoothly. */
+const GAP_OPEN_RATE = 28;
+const GAP_CLOSE_RATE = 12;
+/** largest dynamic gap, as a fraction of the viewport height */
+const GAP_MAX_FRACTION = 0.2;
+
+/** Pixels from the screen center to a direction `deg` off-axis, for a vertical FOV and viewport height. */
+export function angleToPixels(deg: number, fovDeg: number, viewportHeight: number): number {
+  const focal = viewportHeight / 2 / Math.tan((fovDeg * DEG2RAD) / 2);
+  return Math.tan(Math.min(89, Math.max(0, deg)) * DEG2RAD) * focal;
+}
+
+/**
+ * One easing step of the dynamic crosshair gap toward `target` px. Returns the new
+ * eased value; the caller writes whole pixels only when it has moved far enough.
+ */
+export function easeGap(shown: number, target: number, dt: number): number {
+  const rate = target > shown ? GAP_OPEN_RATE : GAP_CLOSE_RATE;
+  return shown + (target - shown) * (1 - Math.exp(-rate * Math.max(0, dt)));
 }
 
 export interface OverlayHandlers {
@@ -23,6 +62,13 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, className: string, pa
   e.className = className;
   parent?.appendChild(e);
   return e;
+}
+
+/** An element holding one Text node; writing `.data` is cheaper than textContent. */
+function textEl(className: string, parent: HTMLElement): Text {
+  const t = document.createTextNode('');
+  el('div', className, parent).appendChild(t);
+  return t;
 }
 
 const CONTROLS: [string, string][] = [
@@ -44,15 +90,22 @@ export class Hud {
   private readonly crosshair: HTMLElement;
   private readonly arms: HTMLElement[];
   private readonly dot: HTMLElement;
-  private readonly speed: HTMLElement;
-  private readonly vspeed: HTMLElement;
-  private readonly jumps: HTMLElement;
-  private readonly fps: HTMLElement;
-  private readonly debug: HTMLElement;
+  private readonly speedBox: HTMLElement;
+  private readonly speed: Text;
+  private readonly vspeed: Text;
+  private readonly jumps: Text;
+  private readonly fps: Text;
+  private readonly debug: Text;
   private readonly overlay: HTMLElement;
   private readonly message: HTMLElement;
-  private readonly cache = new Map<HTMLElement, string>();
   private fast = false;
+  private readoutAt = -Infinity;
+  private viewW = 1;
+  private viewH = 1;
+  /** dynamic crosshair: eased gap (px) and the whole-pixel value last written */
+  private gapShown = 0;
+  private gapPx = 0;
+  private dynamic = true;
 
   private frames = 0;
   private windowStart = 0;
@@ -67,13 +120,14 @@ export class Hud {
     this.dot = el('div', 'arm dot', this.crosshair);
 
     const speedo = el('div', 'speedo', this.root);
-    this.speed = el('div', 'speed', speedo);
-    this.vspeed = el('div', 'vspeed', speedo);
-    this.jumps = el('div', 'jumps', speedo);
+    this.speed = textEl('speed', speedo);
+    this.speedBox = this.speed.parentElement!;
+    this.vspeed = textEl('vspeed', speedo);
+    this.jumps = textEl('jumps', speedo);
 
     const corner = el('div', 'corner', this.root);
-    this.fps = el('div', 'fps', corner);
-    this.debug = el('div', 'debug', corner);
+    this.fps = textEl('fps', corner);
+    this.debug = textEl('debug', corner);
 
     this.overlay = el('div', 'overlay', parent);
     this.overlay.id = 'overlay';
@@ -115,8 +169,13 @@ export class Hud {
   }
 
   applySettings(s: ClientSettings): void {
-    this.fps.classList.toggle('hidden', !s.showFps);
-    this.debug.classList.toggle('hidden', !s.showDebug);
+    this.fps.parentElement!.classList.toggle('hidden', !s.showFps);
+    this.debug.parentElement!.classList.toggle('hidden', !s.showDebug);
+    this.dynamic = s.dynamicCrosshair;
+    if (!this.dynamic) {
+      this.gapShown = 0;
+      this.setGap(0);
+    }
     this.applyCrosshair(s);
   }
 
@@ -140,29 +199,54 @@ export class Hud {
       a.style.cssText = `left:${x}px;top:${y}px;width:${w}px;height:${h}px;display:${len > 0 ? 'block' : 'none'}`;
     });
     this.dot.style.cssText = `left:${lo}px;top:${lo}px;width:${t}px;height:${t}px;display:${s.crosshairDot ? 'block' : 'none'}`;
+    // cssText dropped the arms' dynamic-gap transforms: put them back
+    const px = this.gapPx;
+    this.gapPx = 0;
+    this.setGap(px);
     this.crosshair.style.setProperty('--ch-color', s.crosshairColor);
     this.crosshair.classList.toggle('outlined', s.crosshairOutline);
     this.layoutCrosshair();
   }
 
   private layoutCrosshair(): void {
-    const w = this.root.clientWidth || window.innerWidth;
-    const h = this.root.clientHeight || window.innerHeight;
-    this.crosshair.style.transform = `translate(${Math.floor(w / 2)}px, ${Math.floor(h / 2)}px)`;
+    // resize only: the size is cached so update() never reads layout
+    this.viewW = this.root.clientWidth || window.innerWidth;
+    this.viewH = this.root.clientHeight || window.innerHeight;
+    this.crosshair.style.transform = `translate(${Math.floor(this.viewW / 2)}px, ${Math.floor(this.viewH / 2)}px)`;
   }
 
-  private set(e: HTMLElement, text: string): void {
-    if (this.cache.get(e) === text) return;
-    this.cache.set(e, text);
-    e.textContent = text;
+  private set(t: Text, text: string): void {
+    if (t.data !== text) t.data = text;
+  }
+
+  /** Push the four arms out by `px` beyond the static gap (transform only: no layout). */
+  private setGap(px: number): void {
+    if (px === this.gapPx) return;
+    this.gapPx = px;
+    const [top, bottom, left, right] = this.arms as [HTMLElement, HTMLElement, HTMLElement, HTMLElement];
+    top.style.transform = px ? `translate(0,${-px}px)` : '';
+    bottom.style.transform = px ? `translate(0,${px}px)` : '';
+    left.style.transform = px ? `translate(${-px}px,0)` : '';
+    right.style.transform = px ? `translate(${px}px,0)` : '';
   }
 
   update(f: HudFrame): void {
+    if (this.dynamic) {
+      const target = Math.min(angleToPixels(f.spreadDeg, f.fovDeg, this.viewH), this.viewH * GAP_MAX_FRACTION);
+      this.gapShown = easeGap(this.gapShown, target, f.dt);
+      // whole pixels keep the arms crisp; moving only past 0.75 px stops 1 px flicker
+      if (Math.abs(this.gapShown - this.gapPx) > 0.75 || (this.gapShown < 0.5 && this.gapPx !== 0)) {
+        this.setGap(Math.round(this.gapShown));
+      }
+    }
+
+    if (f.now - this.readoutAt < 1000 / READOUT_HZ - 1) return;
+    this.readoutAt = f.now;
     this.set(this.speed, String(Math.round(f.speed)));
     const fast = f.speed > f.maxSpeed + 0.5;
     if (fast !== this.fast) {
       this.fast = fast;
-      this.speed.classList.toggle('fast', fast);
+      this.speedBox.classList.toggle('fast', fast);
     }
     const vs = Math.round(f.verticalSpeed);
     this.set(this.vspeed, vs === 0 ? 'vert 0' : `vert ${vs > 0 ? '+' : ''}${vs}`);

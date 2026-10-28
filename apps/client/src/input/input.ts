@@ -11,6 +11,8 @@ import { CmdBuilder, type Action } from './cmdBuilder.ts';
 export interface InputCallbacks {
   respawn(): void;
   togglePanel(): void;
+  /** F2: the frame-time graph */
+  togglePerf(): void;
   activeChange(active: boolean): void;
   message(text: string): void;
 }
@@ -71,8 +73,18 @@ export class Input {
     document.addEventListener('pointerlockchange', this.onLockChange, opts);
     document.addEventListener('pointerlockerror', this.onLockError, opts);
     document.addEventListener('fullscreenchange', this.onFullscreenChange, opts);
-    window.addEventListener('blur', () => this.cmd.releaseAll(), opts);
+    // Nothing may stay held once we stop seeing key/button-up events: focus moving to
+    // another window, the tab hiding (it can happen without a blur), or losing the
+    // pointer lock (setActive). Look deltas from before the switch are dropped too.
+    window.addEventListener('blur', this.dropHeld, opts);
+    document.addEventListener('visibilitychange', () => document.hidden && this.dropHeld(), opts);
   }
+
+  private readonly dropHeld = (): void => {
+    this.cmd.releaseAll();
+    this.dx = this.dy = 0;
+    this.dragging = false;
+  };
 
   get pointerLocked(): boolean {
     return document.pointerLockElement === this.target;
@@ -174,6 +186,11 @@ export class Input {
   private readonly onKeyDown = (e: KeyboardEvent): void => {
     if (isTyping(e.target)) return;
     const code = e.code;
+    if (code === 'F2') {
+      e.preventDefault();
+      if (!e.repeat) this.cb.togglePerf();
+      return;
+    }
     if (code === 'F1' || code === 'Backquote') {
       e.preventDefault();
       if (!e.repeat) this.cb.togglePanel();

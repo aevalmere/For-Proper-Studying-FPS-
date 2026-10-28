@@ -44,6 +44,11 @@ export interface GameContext {
   settings: ClientSettings;
   /** true while the pointer is locked (or drag-look fallback is active) and game input is live */
   inputActive: boolean;
+  /**
+   * Spread (degrees, cone half-angle) the next shot would have right now. Written by
+   * the shooting system each tick; the HUD's dynamic crosshair reads it.
+   */
+  aimSpreadDeg: number;
 }
 
 export interface ClientSystem {

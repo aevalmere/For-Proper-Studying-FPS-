@@ -159,6 +159,35 @@ describe('spread', () => {
   });
 });
 
+describe('burst layout', () => {
+  const forward = viewForward(vec3(), aim.yaw, aim.pitch);
+
+  function burst(jitter: number, seed = 3): number[] {
+    const def = cloneWeaponDefs().spritzer;
+    def.stats.pelletJitter = jitter;
+    const dirs: Vec3[] = [];
+    const info = fireShot(createWeaponState(def.stats), def, aim, standing(), createRng(seed), dirs);
+    return dirs.slice(0, info.pellets).map((d) => angleBetween(d, forward) / DEG2RAD);
+  }
+
+  it('with no jitter, puts one pellet on aim and the rest on a ring at 80% of the cone', () => {
+    const cone = cloneWeaponDefs().spritzer.stats.pelletSpreadDeg;
+    const angles = burst(0);
+    expect(angles[0]).toBeCloseTo(0, 9);
+    for (const a of angles.slice(1)) expect(a).toBeCloseTo(cone * 0.8, 2);
+  });
+
+  it('jitter moves pellets off the ring but keeps them in the cone', () => {
+    const cone = cloneWeaponDefs().spritzer.stats.pelletSpreadDeg;
+    for (const jitter of [0.3, 1]) {
+      for (let seed = 1; seed < 30; seed++) {
+        for (const a of burst(jitter, seed)) expect(a).toBeLessThanOrEqual(cone + 1e-6);
+      }
+    }
+    expect(burst(0.3)).not.toEqual(burst(0));
+  });
+});
+
 describe('determinism', () => {
   function spray(rng: Rng): Vec3[] {
     const defs = cloneWeaponDefs();

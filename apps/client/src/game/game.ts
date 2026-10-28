@@ -31,6 +31,11 @@ import {
   type PlayerState,
   type Vec3,
 } from '@splat/shared';
+import { createBench, type LoopDriver } from '../bench/bench.ts';
+import { PerfGraph } from '../hud/perfGraph.ts';
+import { AdaptiveScale } from '../render/adaptiveScale.ts';
+import { prewarm } from '../render/prewarm.ts';
+import type { DevPanel } from '../dev/panel.ts';
 import { createShootingSystem } from '../shooting/index.ts';
 import { buildDevPanel } from '../dev/panel.ts';
 import { Hud } from '../hud/hud.ts';
@@ -38,8 +43,17 @@ import { Input } from '../input/input.ts';
 import { applyMouseLook } from '../input/look.ts';
 import { createRenderRig } from '../render/renderer.ts';
 import { buildMapView, mapBounds } from '../render/mapMesh.ts';
-import { loadSettings, type ClientSettings } from '../settings.ts';
+import {
+  SETTINGS_OPTIONS,
+  defaultQuality,
+  defaultSettings,
+  loadSettings,
+  saveSettings,
+  type ClientSettings,
+  type Quality,
+} from '../settings.ts';
 import { planSteps, stepAlpha, type FixedStep } from './fixedStep.ts';
+import { createFrameProfile } from './profile.ts';
 import type { ClientSystem, GameContext, SystemFactory } from './types.ts';
 
 /** Systems registered at startup. */
@@ -91,7 +105,18 @@ function topDownCamera(bounds: { min: THREE.Vector3; max: THREE.Vector3 }, aspec
 
 export function createGame(container: HTMLElement): Game {
   const params = new URLSearchParams(location.search);
-  const settings: ClientSettings = loadSettings();
+  const benchMode = params.has('bench') && params.get('bench') !== '0';
+  // the bench ignores saved settings so runs are comparable; ?quality= picks the preset
+  const qualityParam = params.get('quality') as Quality | null;
+  const settings: ClientSettings = benchMode
+    ? defaultSettings(qualityParam && SETTINGS_OPTIONS.quality.includes(qualityParam) ? qualityParam : defaultQuality())
+    : loadSettings();
+  if (benchMode) {
+    // A/B knobs for the bench: ?scale=0.5 fixes the render scale, ?adaptive=0|1
+    const sc = Number(params.get('scale'));
+    if (params.has('scale') && sc > 0) settings.renderScale = sc;
+    if (params.has('adaptive')) settings.adaptiveResolution = params.get('adaptive') !== '0';
+  }
   const map = ARENA;
   const decor = ARENA_DECOR;
   const teleports: MapTeleport[] = decor.teleports.length
@@ -114,6 +139,13 @@ export function createGame(container: HTMLElement): Game {
   });
   hud.applySettings(settings);
   hud.showOverlay(true);
+  const perf = new PerfGraph(hud.root);
+  perf.setVisible(settings.perfGraph);
+
+  // the user's render scale is the ceiling; adaptive resolution may go below it
+  const adaptive = new AdaptiveScale(settings.renderScale);
+  const applyScale = () => rig.setRenderScale(settings.adaptiveResolution ? adaptive.scale : settings.renderScale);
+  applyScale();
 
   const tpParam = Number(params.get('tp'));
   if (params.has('tp') && Number.isInteger(tpParam) && tpParam >= 0 && tpParam < teleports.length) settings.spawnAt = tpParam;
@@ -145,6 +177,7 @@ export function createGame(container: HTMLElement): Game {
     modifiers: { ...DEFAULT_MODIFIERS },
     settings,
     inputActive: false,
+    aimSpreadDeg: 0,
   };
   const deg = (k: string) => (params.has(k) ? (Number(params.get(k)) * Math.PI) / 180 : null);
   ctx.view.yaw = deg('yaw') ?? ctx.view.yaw;
@@ -154,23 +187,31 @@ export function createGame(container: HTMLElement): Game {
   let takeoffSpeed = 0;
   let landSpeed = 0;
 
-  const respawn = () => {
-    const tp = teleports[settings.spawnAt] ?? teleports[0]!;
+  const teleportTo = (index: number) => {
+    const tp = teleports[index] ?? teleports[0]!;
     assignState(ctx.player, createPlayerState(tp.pos));
     ctx.prevPlayer = prev = clonePlayerState(ctx.player);
     ctx.view.yaw = tp.yaw;
     ctx.view.pitch = 0;
     takeoffSpeed = landSpeed = 0;
   };
+  const respawn = () => teleportTo(settings.spawnAt);
 
-  let panelVisible = params.get('panel') !== '0';
+  let panelVisible = params.get('panel') !== '0' && !benchMode;
   gui.show(panelVisible);
+  let panel: DevPanel | null = null;
 
   input = new Input(renderer.domElement, settings, {
     respawn,
     togglePanel: () => {
       panelVisible = !panelVisible;
       gui.show(panelVisible);
+    },
+    togglePerf: () => {
+      settings.perfGraph = !settings.perfGraph;
+      perf.setVisible(settings.perfGraph);
+      saveSettings(settings);
+      panel?.refresh();
     },
     activeChange: (active) => {
       ctx.inputActive = active;
@@ -180,14 +221,31 @@ export function createGame(container: HTMLElement): Game {
   }, LOADOUT.length);
   if (input.dragFallback) hud.setMessage('Mouse lock is not available here: drag with the mouse to look.');
 
-  buildDevPanel(gui, ctx.movement, settings, teleports, {
+  panel = buildDevPanel(gui, ctx.movement, settings, teleports, {
     settingChanged: (key) => {
       switch (key) {
         case 'fov':
           rig.setFov(settings.fov);
           break;
-        case 'quality':
+        case 'quality': {
           rig.applyQuality(settings.quality);
+          // quality is a preset: it brings its own resolution defaults
+          const d = defaultSettings(settings.quality);
+          settings.renderScale = d.renderScale;
+          settings.adaptiveResolution = d.adaptiveResolution;
+          saveSettings(settings);
+          adaptive.reset(settings.renderScale);
+          applyScale();
+          panel?.refresh();
+          break;
+        }
+        case 'renderScale':
+        case 'adaptiveResolution':
+          adaptive.reset(settings.renderScale);
+          applyScale();
+          break;
+        case 'perfGraph':
+          perf.setVisible(settings.perfGraph);
           break;
         case 'gridStrength':
           mapView.grid.uGridStrength.value = settings.gridStrength;
@@ -215,6 +273,10 @@ export function createGame(container: HTMLElement): Game {
     }
   }
 
+  // compile every shader and draw every mesh once now, behind the overlay, instead
+  // of hitching the first time each one comes into view
+  const prewarmMs = prewarm(renderer, scene, camera);
+
   const topCam = params.get('view') === 'top' ? topDownCamera(bounds, window.innerWidth / window.innerHeight) : null;
 
   // --- loop -----------------------------------------------------------------
@@ -224,12 +286,54 @@ export function createGame(container: HTMLElement): Game {
   const eyePrev = vec3();
   const eyeCur = vec3();
   const eye = vec3();
+  const prof = createFrameProfile();
   let raf = 0;
   let last = 0;
   let debugAt = 0;
 
+  // A hidden tab gets no frames. Coming back must not run a burst of catch-up ticks
+  // (up to MAX_FRAME_DT of sim with input released): restart the clock instead.
+  const loopEvents = new AbortController();
+  document.addEventListener(
+    'visibilitychange',
+    () => {
+      if (!document.hidden) return;
+      last = 0;
+      stepper.acc = 0;
+    },
+    { signal: loopEvents.signal },
+  );
+  if (benchMode && params.get('hud') === '0') hud.root.style.display = 'none';
+
+  let driver: LoopDriver | null = null;
+  if (benchMode) {
+    hud.showOverlay(false);
+    driver = createBench(
+      {
+        ctx,
+        teleport: teleportTo,
+        describe: () => ({
+          quality: settings.quality,
+          renderScale: rig.renderScale,
+          adaptiveResolution: settings.adaptiveResolution,
+          adaptiveChanges: adaptive.changes,
+          prewarmMs: Math.round(prewarmMs),
+          hud: params.get('hud') !== '0',
+          pixelRatio: renderer.getPixelRatio(),
+          canvas: [renderer.domElement.clientWidth, renderer.domElement.clientHeight],
+          drawingBuffer: [renderer.domElement.width, renderer.domElement.height],
+          antialias: rig.antialias,
+          shadows: renderer.shadowMap.enabled,
+        }),
+      },
+      params,
+    );
+  }
+
   const tick = () => {
+    const t0 = performance.now();
     input!.cmd.sample(cmd, ctx.tick, ctx.view.yaw, ctx.view.pitch);
+    driver?.beforeTick(cmd);
     if (!ctx.inputActive) {
       cmd.forward = 0;
       cmd.side = 0;
@@ -241,21 +345,30 @@ export function createGame(container: HTMLElement): Game {
     if (wasOnGround && !ctx.player.onGround) takeoffSpeed = lengthXZ(ctx.player.vel);
     if (!wasOnGround && ctx.player.onGround && takeoffSpeed > 0) landSpeed = lengthXZ(ctx.player.vel);
     if (ctx.player.pos.y < KILL_Y) respawn();
+    const t1 = performance.now();
     for (const s of systems) s.fixedUpdate(cmd, TICK_DT);
     ctx.tick++;
+    const t2 = performance.now();
+    prof.simMs += t1 - t0;
+    prof.fixedMs += t2 - t1;
   };
 
   const frame = (now: number) => {
     raf = requestAnimationFrame(frame);
+    const tStart = performance.now();
     const frameMs = last ? now - last : 0;
     last = now;
+    prof.frameMs = frameMs;
+    prof.simMs = prof.fixedMs = 0;
 
     input!.consumeLook(look);
     if (look.dx || look.dy) applyMouseLook(ctx.view, look.dx, look.dy, settings.sensitivity, settings.invertY);
 
     const steps = planSteps(stepper, frameMs / 1000, TICK_DT);
     for (let i = 0; i < steps; i++) tick();
+    prof.ticks = steps;
     const alpha = stepAlpha(stepper, TICK_DT);
+    driver?.frame(alpha);
 
     getEyePosition(prev, ctx.movement, eyePrev);
     getEyePosition(ctx.player, ctx.movement, eyeCur);
@@ -263,7 +376,10 @@ export function createGame(container: HTMLElement): Game {
     camera.position.set(eye.x, eye.y, eye.z);
     camera.rotation.set(ctx.view.pitch + ctx.viewPunch.pitch, ctx.view.yaw + ctx.viewPunch.yaw, 0);
 
+    const tSys = performance.now();
     for (const s of systems) s.render(alpha, frameMs / 1000);
+    const tHud = performance.now();
+    prof.systemsMs = tHud - tSys;
 
     const p = ctx.player;
     hud.update({
@@ -272,6 +388,10 @@ export function createGame(container: HTMLElement): Game {
       maxSpeed: readNumber(ctx.movement, 'maxSpeed', 320),
       takeoffSpeed,
       landSpeed,
+      spreadDeg: ctx.aimSpreadDeg,
+      fovDeg: camera.fov,
+      dt: frameMs / 1000,
+      now,
     });
     hud.countFrame(now, frameMs);
     if (settings.showDebug && now - debugAt > 66) {
@@ -284,7 +404,23 @@ export function createGame(container: HTMLElement): Game {
       );
     }
 
+    const tDraw = performance.now();
+    prof.hudMs = tDraw - tHud;
     renderer.render(scene, topCam ?? camera);
+    const tEnd = performance.now();
+    prof.drawMs = tEnd - tDraw;
+    prof.cpuMs = tEnd - tStart;
+    prof.calls = renderer.info.render.calls;
+    prof.triangles = renderer.info.render.triangles;
+    driver?.endFrame(prof, now);
+
+    if (settings.adaptiveResolution && adaptive.frame(frameMs)) applyScale();
+    perf.push(prof, now, {
+      renderScale: rig.renderScale,
+      adaptive: settings.adaptiveResolution,
+      bufferW: renderer.domElement.width,
+      bufferH: renderer.domElement.height,
+    });
   };
 
   return {
@@ -295,8 +431,10 @@ export function createGame(container: HTMLElement): Game {
     stop() {
       cancelAnimationFrame(raf);
       raf = 0;
+      loopEvents.abort();
       for (const s of systems) s.dispose?.();
       input?.dispose();
+      perf.dispose();
     },
   };
 }

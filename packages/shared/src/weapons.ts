@@ -8,7 +8,7 @@
 import type { Vec3 } from './math.ts';
 import type { TunableMeta } from './index.ts';
 import type { Rng } from './rng.ts';
-import { type MoveSample, type ShotInfo, type SprayPoint, fireShot } from './spray.ts';
+import { type MoveSample, type ShotInfo, type SprayPoint, computeSpreadDeg, fireShot } from './spray.ts';
 import { type Projectile, spawnProjectile } from './projectile.ts';
 
 export type WeaponId = 'splatter' | 'lobber' | 'spritzer';
@@ -22,6 +22,11 @@ export interface WeaponStats {
   automatic: boolean;
   /** shots per minute */
   rpm: number;
+  /**
+   * a press this close (ms) before the marker is ready again is kept and fires the
+   * moment it is, even if the button was already let go; earlier presses are dropped
+   */
+  triggerBufferMs: number;
   /** balls per hopper; also the spray pattern length */
   hopperSize: number;
   /** balls per shot (Spritzer fires a burst) */
@@ -32,8 +37,10 @@ export interface WeaponStats {
   ballGravity: number;
   /** linear velocity damping, 1/s (0 = none); shortens effective range */
   ballDrag: number;
-  /** ball radius, u; pads target hitboxes and sizes the rendered ball */
+  /** ball radius, u: the drawn size and the radius used against target hitboxes */
   ballRadius: number;
+  /** extra radius against targets only, u; 0 = a hit needs the drawn ball to touch */
+  hitRadiusBonus: number;
   /** seconds before an unhit ball pops in the air */
   ballLifetime: number;
   /** paint meter fill per ball (meter is 0..100) */
@@ -60,6 +67,11 @@ export interface WeaponStats {
   crouchSpreadScale: number;
   /** per-ball cone around the shot direction, deg (bursts only) */
   pelletSpreadDeg: number;
+  /**
+   * bursts only: 0 = pellets in a fixed ring (one in the middle) that shows the cone
+   * clearly in the splats, 1 = each pellet anywhere in the cone; in between blends
+   */
+  pelletJitter: number;
   /** fraction of the pattern offset applied to the camera as view punch */
   viewPunchScale: number;
 }
@@ -91,8 +103,9 @@ const SPLATTER_PATTERN: SprayPoint[] = [
   sp(5.05, 0), sp(5.05, -0.3), sp(5.06, -0.55), sp(5.08, -0.75), sp(5.1, -0.9),
 ];
 
-// Lobber: hard climb on quick follow-ups. At the default rate a patient tapper stays
-// on shot 0, because the fire interval is just under the spray reset.
+// Lobber: hard climb on quick follow-ups. The fire interval (429 ms at 140 RPM) is
+// just under the 450 ms spray reset, so firing at the max rate climbs, while waiting
+// a moment longer than the interval stays on shot 0.
 const LOBBER_PATTERN: SprayPoint[] = [
   sp(0, 0), sp(1.8, 0.2), sp(3.2, -0.15), sp(4.2, 0.3), sp(4.9, -0.2), sp(5.4, 0.25), sp(5.7, -0.1), sp(5.9, 0.15),
 ];
@@ -110,12 +123,14 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
     stats: {
       automatic: true,
       rpm: 600,
+      triggerBufferMs: 120,
       hopperSize: 30,
       pellets: 1,
       ballSpeed: 3600,
       ballGravity: 350,
       ballDrag: 0,
-      ballRadius: 1.4,
+      ballRadius: 2.25,
+      hitRadiusBonus: 0,
       ballLifetime: 2,
       paintPerHit: 20,
       splatRadius: 9,
@@ -129,6 +144,7 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
       airSpreadDeg: 6,
       crouchSpreadScale: 0.6,
       pelletSpreadDeg: 0,
+      pelletJitter: 0.3,
       viewPunchScale: 0.45,
     },
   },
@@ -140,12 +156,14 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
     stats: {
       automatic: false,
       rpm: 140,
+      triggerBufferMs: 120,
       hopperSize: 8,
       pellets: 1,
       ballSpeed: 2000,
       ballGravity: 900,
       ballDrag: 0,
-      ballRadius: 2.4,
+      ballRadius: 3.75,
+      hitRadiusBonus: 0,
       ballLifetime: 3,
       paintPerHit: 50,
       splatRadius: 20,
@@ -159,6 +177,7 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
       airSpreadDeg: 7,
       crouchSpreadScale: 0.6,
       pelletSpreadDeg: 0,
+      pelletJitter: 0.3,
       viewPunchScale: 0.45,
     },
   },
@@ -170,12 +189,14 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
     stats: {
       automatic: false,
       rpm: 70,
+      triggerBufferMs: 120,
       hopperSize: 6,
       pellets: 8,
       ballSpeed: 2600,
       ballGravity: 500,
       ballDrag: 3,
-      ballRadius: 0.9,
+      ballRadius: 1.5,
+      hitRadiusBonus: 0,
       ballLifetime: 0.3,
       paintPerHit: 10,
       splatRadius: 5,
@@ -189,6 +210,7 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
       airSpreadDeg: 4,
       crouchSpreadScale: 0.6,
       pelletSpreadDeg: 5,
+      pelletJitter: 0.3,
       viewPunchScale: 0.4,
     },
   },
@@ -196,12 +218,14 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
 
 export const WEAPON_META: Partial<Record<keyof WeaponStats, TunableMeta>> = {
   rpm: { min: 30, max: 1200, step: 5, label: 'fire rate (RPM)' },
+  triggerBufferMs: { min: 0, max: 400, step: 5, label: 'click buffer (ms)' },
   hopperSize: { min: 1, max: 100, step: 1, label: 'hopper size' },
   pellets: { min: 1, max: 20, step: 1, label: 'balls per shot' },
   ballSpeed: { min: 300, max: 8000, step: 10, label: 'ball speed (u/s)' },
   ballGravity: { min: 0, max: 2000, step: 10, label: 'ball gravity (u/s²)' },
   ballDrag: { min: 0, max: 10, step: 0.05, label: 'ball drag (1/s)' },
   ballRadius: { min: 0.25, max: 8, step: 0.05, label: 'ball radius (u)' },
+  hitRadiusBonus: { min: 0, max: 8, step: 0.05, label: 'hit radius bonus (u)' },
   ballLifetime: { min: 0.05, max: 5, step: 0.01, label: 'ball lifetime (s)' },
   paintPerHit: { min: 1, max: 100, step: 1, label: 'paint per hit' },
   splatRadius: { min: 1, max: 64, step: 0.5, label: 'splat radius (u)' },
@@ -215,6 +239,7 @@ export const WEAPON_META: Partial<Record<keyof WeaponStats, TunableMeta>> = {
   airSpreadDeg: { min: 0, max: 30, step: 0.1, label: 'airborne spread (°)' },
   crouchSpreadScale: { min: 0, max: 1, step: 0.01, label: 'crouch spread ×' },
   pelletSpreadDeg: { min: 0, max: 20, step: 0.1, label: 'pellet cone (°)' },
+  pelletJitter: { min: 0, max: 1, step: 0.01, label: 'pellet jitter (0 ring, 1 random)' },
   viewPunchScale: { min: 0, max: 1.5, step: 0.01, label: 'view punch ×' },
 };
 
@@ -270,6 +295,8 @@ export interface WeaponState {
   sinceShot: number;
   /** trigger state last tick, for semi-auto edge detection */
   triggerWasDown: boolean;
+  /** a press arrived within triggerBufferMs of the marker being ready; fires when it is */
+  queued: boolean;
   /** shots fired over the weapon's lifetime */
   shots: number;
 }
@@ -282,7 +309,15 @@ const COOLDOWN_EPS = 1e-9;
 export const MAX_SHOTS_PER_TICK = 4;
 
 export function createWeaponState(stats: WeaponStats): WeaponState {
-  return { ammo: stats.hopperSize, sprayIndex: 0, cooldown: 0, sinceShot: SINCE_SHOT_CAP, triggerWasDown: false, shots: 0 };
+  return {
+    ammo: stats.hopperSize,
+    sprayIndex: 0,
+    cooldown: 0,
+    sinceShot: SINCE_SHOT_CAP,
+    triggerWasDown: false,
+    queued: false,
+    shots: 0,
+  };
 }
 
 export function refillHopper(ws: WeaponState, stats: WeaponStats): void {
@@ -291,8 +326,8 @@ export function refillHopper(ws: WeaponState, stats: WeaponStats): void {
 
 /**
  * Advance the trigger one tick and return how many shots fire this tick (usually 0
- * or 1). Handles fire rate, semi-auto edge detection, ammo, and the spray reset
- * timer. Pattern index advancing per shot is done by `fireShot`.
+ * or 1). Handles fire rate, semi-auto edge detection, the click buffer, ammo, and
+ * the spray reset timer. Pattern index advancing per shot is done by `fireShot`.
  */
 export function triggerWeapon(ws: WeaponState, stats: WeaponStats, fireDown: boolean, dt: number, infiniteAmmo: boolean): number {
   const press = fireDown && !ws.triggerWasDown;
@@ -301,8 +336,12 @@ export function triggerWeapon(ws: WeaponState, stats: WeaponStats, fireDown: boo
   ws.sinceShot = Math.min(ws.sinceShot + dt, SINCE_SHOT_CAP);
   if (ws.sinceShot >= stats.sprayResetMs / 1000) ws.sprayIndex = 0;
 
+  // A click just before the marker is ready is kept instead of eaten, so tapping a
+  // semi-auto at its max rate fires every time. Clicks earlier than that are dropped.
+  if (press && ws.cooldown > COOLDOWN_EPS && ws.cooldown <= stats.triggerBufferMs / 1000 + COOLDOWN_EPS) ws.queued = true;
+
   const interval = 60 / Math.max(1, stats.rpm);
-  const wants = fireDown && (stats.automatic || press);
+  const wants = (fireDown && (stats.automatic || press)) || ws.queued;
   let shots = 0;
   if (wants) {
     while (ws.cooldown <= COOLDOWN_EPS && shots < MAX_SHOTS_PER_TICK && (infiniteAmmo || ws.ammo > 0)) {
@@ -312,6 +351,8 @@ export function triggerWeapon(ws: WeaponState, stats: WeaponStats, fireDown: boo
       if (!stats.automatic) break;
     }
   }
+  // fired, or ready but dry: either way the queued click is spent
+  if (shots > 0 || ws.cooldown <= COOLDOWN_EPS) ws.queued = false;
 
   ws.cooldown -= dt;
   // Carry the remainder only while actually firing; otherwise a held semi trigger or
@@ -324,6 +365,32 @@ export function triggerWeapon(ws: WeaponState, stats: WeaponStats, fireDown: boo
     ws.shots += shots;
   }
   return shots;
+}
+
+/**
+ * Pattern index a shot fired on the next tick would use: the current index, or 0 if
+ * the spray reset lands first. Same arithmetic as `triggerWeapon`.
+ */
+export function nextSprayIndex(ws: WeaponState, stats: WeaponStats, dt: number): number {
+  return Math.min(ws.sinceShot + dt, SINCE_SHOT_CAP) >= stats.sprayResetMs / 1000 ? 0 : ws.sprayIndex;
+}
+
+/**
+ * Random spread (deg) of a shot fired on the next tick with this movement. Equals
+ * that shot's `ShotInfo.spreadDeg` if the movement doesn't change in between.
+ */
+export function nextShotSpreadDeg(ws: WeaponState, stats: WeaponStats, move: MoveSample, dt: number): number {
+  return computeSpreadDeg(stats, nextSprayIndex(ws, stats, dt), move);
+}
+
+/**
+ * Half-angle (deg) of the cone every ball of the next shot lands in, around that
+ * shot's aim (view angles plus pattern offset): the shot spread, plus the pellet
+ * cone for bursts. This is what a dynamic crosshair should show.
+ */
+export function aimConeDeg(ws: WeaponState, stats: WeaponStats, move: MoveSample, dt: number): number {
+  const burst = Math.trunc(stats.pellets) > 1 ? stats.pelletSpreadDeg : 0;
+  return nextShotSpreadDeg(ws, stats, move, dt) + burst;
 }
 
 // ---------------------------------------------------------------------------
@@ -365,7 +432,8 @@ const pelletDirs: Vec3[] = [];
 /**
  * Advance a shooter one tick: switch markers, run every trigger, and spawn balls for
  * the shots fired. New balls are appended to `outBalls` (not yet stepped); one
- * `ShotInfo` per shot is appended to `outShots` if given.
+ * `ShotInfo` per shot is appended to `outShots` if given. Spent balls in `pool` are
+ * recycled before new ones are allocated.
  */
 export function stepShooter(
   s: ShooterState,
@@ -376,9 +444,12 @@ export function stepShooter(
   opts: ShooterOptions,
   outBalls: Projectile[],
   outShots?: ShotInfo[],
+  pool?: Projectile[],
 ): void {
   const slot = Math.max(0, Math.min(LOADOUT.length - 1, Math.trunc(input.weapon) || 0));
   if (slot !== s.active) {
+    // a click queued on the marker being put away must not fire later
+    s.weapons[s.active]!.queued = false;
     s.active = slot;
     // A trigger held through the switch must not fire a semi-auto marker.
     s.weapons[slot]!.triggerWasDown = input.fire;
@@ -391,7 +462,7 @@ export function stepShooter(
     for (let k = 0; k < shots; k++) {
       const info = fireShot(ws, def, input, input.move, rng, pelletDirs);
       for (let p = 0; p < info.pellets; p++) {
-        outBalls.push(spawnProjectile(s.nextBallId++, opts.owner, def.id, def.stats, input.eye, pelletDirs[p]!));
+        outBalls.push(spawnProjectile(s.nextBallId++, opts.owner, def.id, def.stats, input.eye, pelletDirs[p]!, pool?.pop()));
       }
       outShots?.push(info);
     }

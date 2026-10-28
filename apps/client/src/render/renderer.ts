@@ -14,6 +14,15 @@ export interface RenderRig {
   applyQuality(q: Quality): void;
   /** CS-style horizontal FOV at 4:3 */
   setFov(fov43: number): void;
+  /**
+   * 3D resolution as a fraction of the window (0.5..1). The canvas keeps its CSS
+   * size and the browser stretches the smaller drawing buffer to fill it.
+   */
+  setRenderScale(scale: number): void;
+  /** the render scale in effect */
+  readonly renderScale: number;
+  /** canvas CSS size, cached on resize so per-frame code never reads layout */
+  readonly viewport: { width: number; height: number };
   resize(): void;
 }
 
@@ -71,10 +80,22 @@ export function createRenderRig(container: HTMLElement, settings: ClientSettings
   sun.shadow.normalBias = 1.5;
 
   let fov43 = settings.fov;
+  let quality = settings.quality;
+  let renderScale = clampScale(settings.renderScale);
+  const viewport = { width: 1, height: 1 };
+
+  const applyPixelRatio = () => {
+    const base = quality === 'high' ? Math.min(window.devicePixelRatio || 1, 2) : 1;
+    const pr = base * renderScale;
+    if (renderer.getPixelRatio() !== pr) renderer.setPixelRatio(pr);
+  };
 
   const resize = () => {
     const w = container.clientWidth || window.innerWidth;
     const h = container.clientHeight || window.innerHeight;
+    viewport.width = w;
+    viewport.height = h;
+    applyPixelRatio();
     renderer.setSize(w, h, true);
     camera.aspect = w / h;
     camera.fov = verticalFovFromCs(fov43);
@@ -83,7 +104,7 @@ export function createRenderRig(container: HTMLElement, settings: ClientSettings
 
   const applyQuality = (q: Quality) => {
     const high = q === 'high';
-    renderer.setPixelRatio(high ? Math.min(window.devicePixelRatio || 1, 2) : 1);
+    quality = q;
     if (renderer.shadowMap.enabled !== high) {
       renderer.shadowMap.enabled = high;
       sun.castShadow = high;
@@ -110,6 +131,20 @@ export function createRenderRig(container: HTMLElement, settings: ClientSettings
       fov43 = f;
       resize();
     },
+    setRenderScale(scale: number) {
+      const next = clampScale(scale);
+      if (next === renderScale) return;
+      renderScale = next;
+      applyPixelRatio();
+    },
+    get renderScale() {
+      return renderScale;
+    },
+    viewport,
     resize,
   };
+}
+
+function clampScale(s: number): number {
+  return Number.isFinite(s) ? Math.min(1, Math.max(0.25, s)) : 1;
 }

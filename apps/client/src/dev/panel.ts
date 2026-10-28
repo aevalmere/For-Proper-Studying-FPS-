@@ -16,13 +16,18 @@ export interface PanelHooks {
   lowLatency: boolean;
 }
 
+export interface DevPanel {
+  /** re-read every Settings control (after code changed a setting) */
+  refresh(): void;
+}
+
 export function buildDevPanel(
   gui: GUI,
   movement: MovementConfig,
   s: ClientSettings,
   teleports: readonly MapTeleport[],
   hooks: PanelHooks,
-): void {
+): DevPanel {
   addTunables(gui, 'Movement', movement, MOVEMENT_CONFIG_META, {
     storageKey: 'splat.movement',
     presets: MOVEMENT_PRESETS,
@@ -55,6 +60,8 @@ export function buildDevPanel(
   const view = settings.addFolder('View');
   num(view, 'fov', 'FOV (CS, 4:3)');
   view.add(s, 'quality', SETTINGS_OPTIONS.quality).name('quality').onChange(changed('quality'));
+  num(view, 'renderScale', 'render scale');
+  bool(view, 'adaptiveResolution', 'auto-lower resolution');
   bool(view, 'lowLatency', 'low-latency canvas');
   num(view, 'gridStrength', 'grid');
   const noteCtl = view.add(note, 'text').name('note').disable();
@@ -66,10 +73,12 @@ export function buildDevPanel(
   ch.addColor(s, 'crosshairColor').name('color').onChange(changed('crosshairColor'));
   bool(ch, 'crosshairOutline', 'outline');
   bool(ch, 'crosshairDot', 'center dot');
+  bool(ch, 'dynamicCrosshair', 'dynamic (shows spread)');
 
   const hud = settings.addFolder('HUD');
   bool(hud, 'showFps', 'FPS');
   bool(hud, 'showDebug', 'debug line');
+  bool(hud, 'perfGraph', 'frame graph (F2)');
 
   settings
     .add(
@@ -108,4 +117,8 @@ export function buildDevPanel(
   });
   sandbox.add({ respawn: hooks.respawn }, 'respawn').name('respawn (R)');
   sandbox.add({ fullscreen: hooks.fullscreen }, 'fullscreen').name('fullscreen + keyboard lock');
+
+  return {
+    refresh: () => settings.controllersRecursive().forEach((c) => c.updateDisplay()),
+  };
 }

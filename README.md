@@ -32,6 +32,7 @@ pnpm dev               # http://localhost:5173
 | 1 / 2 / 3 | Splatter / Lobber / Spritzer |
 | R | Respawn at the selected teleport |
 | F1 or ` | Toggle the tuning panel |
+| F2 | Toggle the frame-time graph |
 | Esc | Release the mouse |
 
 Sensitivity uses the CS scale (0.022° per count), so your CS sensitivity carries
@@ -47,6 +48,21 @@ your browser. "copy JSON" puts the current values on the clipboard to paste into
 the presets in `packages/shared/src/movement/config.ts` or
 `packages/shared/src/weapons.ts`. Values that differ from the preset are
 highlighted.
+
+Useful toggles: "show hitboxes" and "show spray pattern" (Shooting folder),
+volume and footsteps (Audio folder), render scale and adaptive resolution
+(Settings).
+
+## Performance benchmark
+
+```sh
+pnpm --filter @splat/client build
+node apps/client/bench/run.mjs --throttle 4,6 --repeat 3
+```
+
+Runs a scripted route in headless Chromium at 1366×768 with the CPU throttled
+4× and 6× (a Chromebook stand-in) and prints frame-time stats. Needs a system
+Playwright install. Open `?bench=1` to run the same route in a normal browser.
 
 ## Deploy (Cloudflare)
 

@@ -34,6 +34,12 @@ body {
 }
 
 /* ---- HUD ---- */
+/*
+ * contain: strict makes the HUD a layout and paint boundary, so a readout changing
+ * every frame re-lays-out a handful of HUD boxes, never the document. (It is also
+ * the containing block for position:fixed children; it covers the viewport, so
+ * their coordinates don't change.)
+ */
 .hud {
   position: absolute;
   inset: 0;
@@ -42,6 +48,7 @@ body {
   color: var(--hud-text);
   text-shadow: var(--hud-shadow);
   font-variant-numeric: tabular-nums;
+  contain: strict;
 }
 
 .hidden {
@@ -57,6 +64,8 @@ body {
 .crosshair .arm {
   position: absolute;
   background: var(--ch-color);
+  /* own compositor layer: the dynamic gap moves arms by transform without repainting */
+  will-change: transform;
 }
 .crosshair.outlined .arm {
   box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.85);
@@ -72,6 +81,8 @@ body {
   transform: translateX(-50%);
   text-align: center;
   line-height: 1;
+  /* own layer: a changing readout re-rasters only this small box */
+  will-change: transform;
 }
 .speedo .speed {
   font-size: 56px;
@@ -94,10 +105,19 @@ body {
   left: 10px;
   top: 8px;
   font: 12px/1.45 ui-monospace, 'Cascadia Mono', Consolas, monospace;
+  will-change: transform;
 }
 .corner .debug {
   opacity: 0.85;
   white-space: pre;
+}
+
+/* frame-time graph (F2) */
+.perf-graph {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  border-radius: 4px;
 }
 
 /* ---- click-to-play overlay ---- */

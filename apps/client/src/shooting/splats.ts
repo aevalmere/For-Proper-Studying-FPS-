@@ -146,7 +146,10 @@ export class SplatDecals {
     mesh.setMatrixAt(index, tmpMat);
     tmpColor.copy(color).offsetHSL(0, 0, nextRange(rng, -0.06, 0.04));
     mesh.setColorAt(index, tmpColor);
+    // upload only this slot; three.js clears the ranges after each upload
+    mesh.instanceMatrix.addUpdateRange(index * 16, 16);
     mesh.instanceMatrix.needsUpdate = true;
+    mesh.instanceColor!.addUpdateRange(index * 3, 3);
     mesh.instanceColor!.needsUpdate = true;
     for (let v = 0; v < VARIANTS; v++) {
       this.meshes[v]!.count = Math.max(0, Math.ceil((this.used - v) / VARIANTS));

@@ -45,7 +45,8 @@ export class Viewmodel {
   private raise = 1;
   private readonly camPos = new THREE.Vector3();
   private readonly camQuat = new THREE.Quaternion();
-  private readonly muzzleWorld = new THREE.Vector3();
+  /** muzzle position at the last render, world space (where a new ball should appear) */
+  readonly muzzleWorld = new THREE.Vector3();
   /** muzzle minus camera position at the last render, world space */
   readonly muzzleOffset: Vec3 = { x: 0, y: 0, z: 0 };
 

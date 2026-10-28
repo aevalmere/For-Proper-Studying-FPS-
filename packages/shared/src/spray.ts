@@ -6,6 +6,11 @@
 // The pattern is added to the view angles (like CS punch angles); random spread is
 // applied as a tangent-plane offset around that direction so it stays round at any
 // pitch.
+//
+// Bursts (Spritzer) put one pellet in the middle and the rest evenly around a ring
+// near the edge of the pellet cone, spun randomly per shot, then blended toward
+// fully random spots by `pelletJitter`. A ring of splats shows how wide the cone is;
+// an all-random cone sometimes clumps and hides it.
 
 import { type Vec3, DEG2RAD, lengthXZ, set, vec3 } from './math.ts';
 import { type Rng, nextFloat } from './rng.ts';
@@ -47,6 +52,9 @@ export interface ShotInfo {
 
 /** Keep the pattern-offset aim off the poles, where yaw degenerates. */
 const PITCH_LIMIT = 89 * DEG2RAD;
+/** Burst ring radius as a fraction of the pellet cone. */
+const PELLET_RING = 0.8;
+const TAU = Math.PI * 2;
 
 /** Pattern offset (radians, scaled) for a shot index; indices past the end repeat the last entry. */
 export function patternOffset(def: WeaponDef, index: number, out: AimAngles = { yaw: 0, pitch: 0 }): AimAngles {
@@ -158,13 +166,21 @@ export function fireShot(
 
   const pellets = Math.max(1, Math.trunc(stats.pellets));
   const cone = stats.pelletSpreadDeg * DEG2RAD;
+  const jitter = Math.max(0, Math.min(1, stats.pelletJitter));
+  // ring spin; drawn for every burst so the Rng sequence doesn't depend on tuning
+  const spin = pellets > 1 ? nextFloat(rng) * TAU : 0;
   for (let i = 0; i < pellets; i++) {
     let right = shotRight;
     let up = shotUp;
     if (pellets > 1) {
+      // fixed spot (middle, or evenly on the ring), blended toward a random one;
+      // both lie inside the cone, so the blend does too
+      const a = spin + ((i - 1) / (pellets - 1)) * TAU;
+      const fx = i === 0 ? 0 : Math.cos(a) * cone * PELLET_RING;
+      const fy = i === 0 ? 0 : Math.sin(a) * cone * PELLET_RING;
       randomInDisc(rng, cone, true);
-      right += Math.tan(disc.x);
-      up += Math.tan(disc.y);
+      right += Math.tan(fx + (disc.x - fx) * jitter);
+      up += Math.tan(fy + (disc.y - fy) * jitter);
     }
     outDirs[i] ??= vec3();
     aimDirection(outDirs[i]!, yaw, pitch, right, up);
