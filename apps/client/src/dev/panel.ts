@@ -21,6 +21,12 @@ export interface DevPanel {
   refresh(): void;
 }
 
+/**
+ * Bump when the default movement preset (or its numbers) changes, so saved slider
+ * values and the saved preset choice stop shadowing it. 1: valorant replaces goldsrc.
+ */
+const MOVEMENT_TUNING_REVISION = 1;
+
 export function buildDevPanel(
   gui: GUI,
   movement: MovementConfig,
@@ -31,6 +37,7 @@ export function buildDevPanel(
   addTunables(gui, 'Movement', movement, MOVEMENT_CONFIG_META, {
     storageKey: 'splat.movement',
     presets: MOVEMENT_PRESETS,
+    revision: MOVEMENT_TUNING_REVISION,
   });
 
   const settings = gui.addFolder('Settings');

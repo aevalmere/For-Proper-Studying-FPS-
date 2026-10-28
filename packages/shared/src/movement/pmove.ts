@@ -1,8 +1,9 @@
-// Quake / Half-Life player movement. Acceleration, friction, air control, jump and
-// duck are ported from SUCC (MIT, see THIRD_PARTY_NOTICES.md); collision response is
-// rebuilt on traceBox after the published Quake / Half-Life SDK pmove (PM_FlyMove,
+// Quake / Half-Life player movement. Acceleration, friction, air acceleration, jump
+// and duck are ported from SUCC (MIT, see THIRD_PARTY_NOTICES.md); collision response
+// is rebuilt on traceBox after the published Quake / Half-Life SDK pmove (PM_FlyMove,
 // PM_WalkMove, PM_ClipVelocity, PM_CategorizePosition, PM_Duck) instead of Godot's
-// move_and_slide.
+// move_and_slide. Air control (steering a hop with the mouse while holding forward)
+// follows the CPMA pm_aircontrol formula, off unless MovementConfig.airControl > 0.
 //
 // Axes: Quake is Z-up and this sim is Y-up, so every Quake `[2]` is `.y` here.
 // `pos` is the feet (centre-bottom of the hull). Quake's origin is mid-hull, so the
@@ -193,7 +194,7 @@ export function stepPlayer(
   const walked = s.onGround;
   const startY = s.pos.y;
   if (walked) walkMove(s, cfg, world, dt, wishspeed);
-  else airMove(s, cfg, world, dt, wishspeed);
+  else airMove(s, cfg, world, dt, wishspeed, sm === 0 && fm !== 0);
 
   if (s.jumped) {
     s.onGround = false;
@@ -500,11 +501,38 @@ function walkMove(s: PlayerState, cfg: MovementConfig, world: CollisionWorld, dt
   stayOnGround(s, cfg, world);
 }
 
-/** PM_AirMove */
-function airMove(s: PlayerState, cfg: MovementConfig, world: CollisionWorld, dt: number, wishspeed: number): void {
+/** PM_AirMove, plus CPM air control when only forward/back is held (`steer`). */
+function airMove(s: PlayerState, cfg: MovementConfig, world: CollisionWorld, dt: number, wishspeed: number, steer: boolean): void {
   airAccelerate(s, wishdir, wishspeed, cfg.airAccelerate, cfg.airSpeedCap, dt);
+  if (steer) airControl(s, wishdir, wishspeed, cfg.airControl, dt);
   setHull(cfg, s.ducked);
   slideMove(s, world, dt);
+}
+
+/**
+ * CPMA pm_aircontrol: rotate the horizontal velocity toward the wish direction
+ * without changing its speed. The turn rate scales with dot^2, so it is strongest
+ * when already heading roughly that way and does nothing once the wish direction is
+ * behind the motion (you cannot steer while slowing down). The caller only applies
+ * it for pure forward/back input; strafe keys keep plain air acceleration.
+ */
+function airControl(s: PlayerState, dir: Vec3, wishspeed: number, control: number, dt: number): void {
+  if (control <= 0 || wishspeed <= 0) return;
+  const vx = s.vel.x;
+  const vz = s.vel.z;
+  const speed = Math.sqrt(vx * vx + vz * vz);
+  if (speed < 1e-6) return;
+  const nx = vx / speed;
+  const nz = vz / speed;
+  const d = nx * dir.x + nz * dir.z;
+  if (d <= 0) return;
+  const k = 32 * control * d * d * dt;
+  const x = nx * speed + dir.x * k;
+  const z = nz * speed + dir.z * k;
+  const len = Math.sqrt(x * x + z * z);
+  if (len < 1e-6) return;
+  s.vel.x = (x / len) * speed;
+  s.vel.z = (z / len) * speed;
 }
 
 /**

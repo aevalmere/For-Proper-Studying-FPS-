@@ -6,6 +6,11 @@
 // Values that differ from the selected preset are highlighted, and hovering a
 // control shows the preset value. "reset to default" restores the selected
 // preset (or the code defaults when there are no presets).
+//
+// Saved values shadow code defaults, so a default changed in code never reaches a
+// browser that has tuned that folder. Bumping `revision` fixes that: values saved
+// under an older revision are dropped on load (except the keys `keep` accepts) and
+// the folder starts on its first preset again.
 
 import type GUI from 'lil-gui';
 import type { Controller } from 'lil-gui';
@@ -18,6 +23,14 @@ export interface TunableOptions<T> {
   presets?: Record<string, T>;
   /** called after any change made through the panel (slider, preset, reset) */
   onChange?: () => void;
+  /**
+   * Bump when code defaults (or the default preset) change in a way saved browser
+   * values must not shadow. Saved values and the saved preset choice from an older
+   * revision are dropped on load, except the keys `keep` accepts.
+   */
+  revision?: number;
+  /** with `revision`: saved keys to carry across the bump (say, a marker's ballistics) */
+  keep?: (key: string) => boolean;
 }
 
 function loadSaved(key: string): Record<string, unknown> | null {
@@ -45,6 +58,12 @@ function save(key: string, value: unknown): void {
   }
 }
 
+function pick(obj: Record<string, unknown>, keep: (key: string) => boolean): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const k of Object.keys(obj)) if (keep(k)) out[k] = obj[k];
+  return out;
+}
+
 function guessMeta(v: number): TunableMeta {
   if (v === 0) return { min: 0, max: 1, step: 0.01 };
   const mag = Math.abs(v);
@@ -63,21 +82,32 @@ export function addTunables<T extends object>(
   const codeDefaults = { ...rec };
   const presets = opts.presets as Record<string, Record<string, unknown>> | undefined;
   const presetNames = presets ? Object.keys(presets) : [];
-  const presetKey = opts.storageKey ? `${opts.storageKey}.preset` : null;
+  const presetKey = opts.storageKey && presets ? `${opts.storageKey}.preset` : null;
+  const revisionKey = opts.storageKey ? `${opts.storageKey}.rev` : null;
+  const revision = opts.revision ?? 0;
+  const savedRevision = revisionKey ? Number(loadString(revisionKey)) || 0 : 0;
+  const stale = revision > savedRevision;
 
   const state = { preset: presetNames[0] ?? '' };
-  const savedPreset = presetKey ? loadString(presetKey) : null;
+  const savedPreset = presetKey && !stale ? loadString(presetKey) : null;
   if (savedPreset && presetNames.includes(savedPreset)) state.preset = savedPreset;
   const baseline = (): Record<string, unknown> => (presets ? (presets[state.preset] ?? codeDefaults) : codeDefaults);
 
   if (opts.storageKey) {
-    const saved = loadSaved(opts.storageKey);
+    const stored = loadSaved(opts.storageKey);
+    const saved = stored && stale ? (opts.keep ? pick(stored, opts.keep) : null) : stored;
     if (saved) {
       for (const k of Object.keys(rec)) {
         if (k in saved && typeof saved[k] === typeof rec[k]) rec[k] = saved[k];
       }
     } else if (presets && savedPreset) {
       Object.assign(target, presets[state.preset]);
+    }
+    if (stale) {
+      // the next load is on this revision, so what is stored must be what survived
+      if (stored) save(opts.storageKey, target);
+      if (presetKey) save(presetKey, state.preset);
+      save(revisionKey!, String(revision));
     }
   }
 

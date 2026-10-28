@@ -47,6 +47,12 @@ export interface ClientSettings {
 }
 
 export const SETTINGS_KEY = 'splat.settings';
+/**
+ * Bump when a changed default must reach browsers that saved the old value, and add
+ * the step to `migrateSettings`. 1: opposing keys cancel out (Valorant movement).
+ */
+export const SETTINGS_REVISION = 1;
+export const SETTINGS_REVISION_KEY = `${SETTINGS_KEY}.rev`;
 
 export const SETTINGS_OPTIONS = {
   quality: ['low', 'high'] as Quality[],
@@ -93,7 +99,7 @@ export function defaultSettings(quality: Quality = defaultQuality()): ClientSett
     adaptiveResolution: quality === 'low',
     lowLatency: false,
     wheel: 'jump',
-    opposingKeys: 'lastWins',
+    opposingKeys: 'cancel',
     ctrlCrouch: true,
     crosshairSize: 6,
     crosshairGap: 3,
@@ -127,11 +133,20 @@ export function mergeSettings(defaults: ClientSettings, saved: unknown): ClientS
   return out;
 }
 
+/** Bring settings saved under `savedRevision` up to SETTINGS_REVISION, in place. */
+export function migrateSettings(s: ClientSettings, savedRevision: number): ClientSettings {
+  if (savedRevision < 1) s.opposingKeys = 'cancel';
+  return s;
+}
+
 export function loadSettings(): ClientSettings {
   const defaults = defaultSettings();
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
-    return mergeSettings(defaults, raw ? JSON.parse(raw) : null);
+    const s = mergeSettings(defaults, raw ? JSON.parse(raw) : null);
+    const savedRevision = Number(localStorage.getItem(SETTINGS_REVISION_KEY)) || 0;
+    if (raw && savedRevision < SETTINGS_REVISION) saveSettings(migrateSettings(s, savedRevision));
+    return s;
   } catch {
     return defaults;
   }
@@ -140,6 +155,7 @@ export function loadSettings(): ClientSettings {
 export function saveSettings(s: ClientSettings): void {
   try {
     localStorage.setItem(SETTINGS_KEY, JSON.stringify(s));
+    localStorage.setItem(SETTINGS_REVISION_KEY, String(SETTINGS_REVISION));
   } catch {
     // storage blocked: settings still apply for this session
   }

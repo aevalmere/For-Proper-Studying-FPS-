@@ -17,6 +17,7 @@ import * as THREE from 'three';
 import {
   Buttons,
   LOADOUT,
+  MOVEMENT_SPREAD_KEYS,
   TICK_DT,
   WEAPON_META,
   aimConeDeg,
@@ -57,6 +58,13 @@ const SPREAD_SEED = 0x5eed5;
 const PUNCH_FOLLOW = 35;
 /** Spent balls kept for reuse. */
 const POOL_CAP = 512;
+/**
+ * Bump when the code defaults of a marker's movement-spread stats change. Saved
+ * tuning for every other stat (ballistics, fire rate, pattern) survives the bump.
+ * 1: Valorant-style penalties (0.3 threshold, square curve, harsher run and air).
+ */
+const SPREAD_TUNING_REVISION = 1;
+const keepBallistics = (key: string): boolean => !(MOVEMENT_SPREAD_KEYS as readonly string[]).includes(key);
 const TARGET_MARK = new THREE.Color(0xffe14d);
 const WORLD_MARK = new THREE.Color(0xffffff);
 
@@ -105,7 +113,13 @@ export const createShootingSystem: SystemFactory = (ctx) => {
   folders[0]!.add(actions, 'clearSplats').name('clear splats');
   folders[0]!.add(actions, 'resetDummies').name('reset dummies');
   for (const id of LOADOUT) {
-    folders.push(addTunables(ctx.gui, defs[id].name, defs[id].stats, WEAPON_META, { storageKey: `splat.weapon.${id}` }));
+    folders.push(
+      addTunables(ctx.gui, defs[id].name, defs[id].stats, WEAPON_META, {
+        storageKey: `splat.weapon.${id}`,
+        revision: SPREAD_TUNING_REVISION,
+        keep: keepBallistics,
+      }),
+    );
   }
   splats.setCap(decalCap()); // saved settings load after construction
 

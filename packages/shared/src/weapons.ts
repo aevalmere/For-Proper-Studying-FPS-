@@ -90,7 +90,17 @@ export interface WeaponDef {
   stats: WeaponStats;
 }
 
+/**
+ * The stats that shape the movement penalty on spread (`computeSpreadDeg`). Listed so
+ * the client can refresh these from code while keeping a player's saved ballistics.
+ */
+export const MOVEMENT_SPREAD_KEYS = ['moveSpreadThreshold', 'moveSpreadDeg', 'moveSpreadCurve', 'airSpreadDeg'] as const satisfies readonly (keyof WeaponStats)[];
+
 const sp = (pitch: number, yaw: number): SprayPoint => ({ pitch, yaw });
+
+// Movement penalties are Valorant-style: walking (~0.5 x max speed) costs a few
+// percent of the run penalty, running costs all of it, and a hop adds more on top.
+// With a threshold of 0.3 and a square curve, 0.5 x max speed is (0.2/0.7)^2 = 8%.
 
 // Splatter: climbs for the first ~10 shots, drifts left until ~shot 20, then swings
 // back right past center. Learn it by pulling down, then right, then left.
@@ -127,21 +137,21 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
       hopperSize: 30,
       pellets: 1,
       ballSpeed: 3600,
-      ballGravity: 350,
+      ballGravity: 600,
       ballDrag: 0,
       ballRadius: 2.25,
       hitRadiusBonus: 0,
-      ballLifetime: 2,
+      ballLifetime: 0.6,
       paintPerHit: 20,
       splatRadius: 9,
       patternScale: 1,
       sprayResetMs: 450,
       firstShotSpreadDeg: 0,
       standSpreadDeg: 0.35,
-      moveSpreadThreshold: 0.15,
-      moveSpreadDeg: 4,
-      moveSpreadCurve: 1.5,
-      airSpreadDeg: 6,
+      moveSpreadThreshold: 0.3,
+      moveSpreadDeg: 7,
+      moveSpreadCurve: 2,
+      airSpreadDeg: 10,
       crouchSpreadScale: 0.6,
       pelletSpreadDeg: 0,
       pelletJitter: 0.3,
@@ -171,10 +181,10 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
       sprayResetMs: 450,
       firstShotSpreadDeg: 0,
       standSpreadDeg: 0.2,
-      moveSpreadThreshold: 0.15,
-      moveSpreadDeg: 5,
-      moveSpreadCurve: 1.5,
-      airSpreadDeg: 7,
+      moveSpreadThreshold: 0.3,
+      moveSpreadDeg: 8,
+      moveSpreadCurve: 2,
+      airSpreadDeg: 12,
       crouchSpreadScale: 0.6,
       pelletSpreadDeg: 0,
       pelletJitter: 0.3,
@@ -191,23 +201,23 @@ export const WEAPONS: Record<WeaponId, WeaponDef> = {
       rpm: 70,
       triggerBufferMs: 120,
       hopperSize: 6,
-      pellets: 8,
+      pellets: 20,
       ballSpeed: 2600,
-      ballGravity: 500,
+      ballGravity: 1900,
       ballDrag: 3,
       ballRadius: 1.5,
       hitRadiusBonus: 0,
-      ballLifetime: 0.3,
+      ballLifetime: 1.4,
       paintPerHit: 10,
       splatRadius: 5,
       patternScale: 1,
       sprayResetMs: 450,
       firstShotSpreadDeg: 0,
       standSpreadDeg: 0.5,
-      moveSpreadThreshold: 0.15,
-      moveSpreadDeg: 2.5,
-      moveSpreadCurve: 1.5,
-      airSpreadDeg: 4,
+      moveSpreadThreshold: 0.3,
+      moveSpreadDeg: 4.5,
+      moveSpreadCurve: 2,
+      airSpreadDeg: 6,
       crouchSpreadScale: 0.6,
       pelletSpreadDeg: 5,
       pelletJitter: 0.3,

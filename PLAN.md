@@ -30,7 +30,7 @@ Three parallel workstreams with disjoint file ownership:
 
 | Workstream | Owns | Delivers |
 |---|---|---|
-| **A. Movement** | `packages/shared/src/movement/**`, fixes to `world/collision.ts`, `THIRD_PARTY_NOTICES.md` | SUCC → TypeScript port: ground accel/friction, air accel + strafing, bhop, counter-strafe, crouch, crouch-jump, step-up, ramps. `goldsrc` and `classroom` presets. Unit tests. |
+| **A. Movement** | `packages/shared/src/movement/**`, fixes to `world/collision.ts`, `THIRD_PARTY_NOTICES.md` | SUCC → TypeScript port: ground accel/friction, air accel + strafing, bhop, counter-strafe, crouch, crouch-jump, step-up, ramps. `goldsrc` and `classroom` presets; `valorant` (sharp accel/stop, capped bhop, CPM-style air control) added later as the default. Unit tests. |
 | **B. Shooting** | `packages/shared/src/{weapons,spray,projectile}.ts`, `apps/client/src/shooting/**` | Splatter / Lobber / Spritzer, spray patterns with 450 ms reset, movement-based spread, ballistic paintballs, splat decals (capped), target range dummies with paint meters, view punch, ∞ ammo toggle, spray debug overlay. Unit tests. |
 | **C. Client core** | `apps/client/**` except `shooting/`, `packages/shared/src/map/**` | Three.js graybox renderer, the arena map, pointer lock + raw mouse (CS-style sensitivity), 64 Hz loop with interpolation, speedometer + HUD, dev tuning panel, settings (sens, FOV, quality). |
 
@@ -43,7 +43,7 @@ Contracts the workstreams code against (written before they started):
 - `apps/client/src/dev/tuning.ts`: `addTunables(gui, title, target, meta, opts)`
 
 **Playtest checklist for phase 0**
-- Speedometer reads ~320 running and ~166 holding Shift (walk = 0.52 × max); counter-strafe stops you almost instantly
+- Speedometer reads ~320 running and ~166 holding Shift (walk = 0.52 × max) on `goldsrc`, ~266 and ~146 on `valorant`; counter-strafe stops you almost instantly
 - Air strafe gains speed; bhop chains hold speed on `goldsrc`, cap on `classroom`
 - Crouch-jump reaches the ledge a normal jump can't; small steps don't stop you
 - Splatter spray is learnable (pull down, then follow the drift); the first shot standing still lands on the crosshair

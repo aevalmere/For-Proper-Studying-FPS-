@@ -18,6 +18,7 @@ import {
 
 const GOLDSRC = MOVEMENT_PRESETS.goldsrc;
 const CLASSROOM = MOVEMENT_PRESETS.classroom;
+const VALORANT = MOVEMENT_PRESETS.valorant;
 const EPS = 0.03125;
 const { JUMP, CROUCH, WALK } = Buttons;
 
@@ -86,6 +87,132 @@ describe('movement config', () => {
     expect(Math.sqrt(2 * GOLDSRC.gravity * GOLDSRC.jumpHeight)).toBeCloseTo(268.33, 2);
     expect(GOLDSRC.airSpeedCap).toBe(30);
     expect(GOLDSRC.stepSize).toBe(18);
+  });
+
+  it('valorant is the default preset and keeps the map-facing numbers of goldsrc', () => {
+    expect(Object.keys(MOVEMENT_PRESETS)[0]).toBe('valorant');
+    for (const key of ['gravity', 'jumpHeight', 'hullWidth', 'standHeight', 'duckHeight', 'stepSize', 'airDuckLift'] as const) {
+      expect(VALORANT[key], key).toBe(GOLDSRC[key]);
+    }
+    // friction's fixed floor must stay below the slowest wish speed's acceleration,
+    // or a crouch-walking player can never speed up (see the preset's comment)
+    const slowest = VALORANT.maxSpeed * VALORANT.walkSpeedScale * VALORANT.duckSpeedScale;
+    expect(VALORANT.accelerate * slowest).toBeGreaterThan(VALORANT.friction * VALORANT.stopSpeed * 1.15);
+  });
+});
+
+describe('valorant preset', () => {
+  const w = world(FLOOR);
+  const MAX = VALORANT.maxSpeed;
+
+  it('reaches run speed within 3 ticks and holds it exactly', () => {
+    let reachedAt = -1;
+    const s = run(standing(), w, VALORANT, 64, cmd({ forward: 1 }), (p, i) => {
+      if (reachedAt < 0 && lengthXZ(p.vel) >= MAX - 1e-6) reachedAt = i + 1;
+    });
+    expect(reachedAt).toBeGreaterThan(0);
+    expect(reachedAt).toBeLessThanOrEqual(3);
+    expect(lengthXZ(s.vel)).toBeCloseTo(MAX, 6);
+  });
+
+  it('stops in about 0.1 s on release, four times faster than goldsrc', () => {
+    const ticksToStop = (cfg: MovementConfig): number => {
+      const s = standing(0, 0, vec3(0, 0, -cfg.maxSpeed));
+      for (let i = 1; i <= 128; i++) {
+        stepPlayer(s, cmd(), cfg, w, TICK_DT);
+        if (lengthXZ(s.vel) === 0) return i;
+      }
+      return Infinity;
+    };
+    const valorant = ticksToStop(VALORANT);
+    expect(valorant).toBeLessThanOrEqual(7);
+    expect(valorant * 4).toBeLessThan(ticksToStop(GOLDSRC));
+  });
+
+  it('counter-strafing stops within 3 ticks', () => {
+    const s = standing(0, 0, vec3(MAX, 0, 0));
+    let stopped = -1;
+    for (let i = 1; i <= 16 && stopped < 0; i++) {
+      stepPlayer(s, cmd({ side: -1 }), VALORANT, w, TICK_DT);
+      if (s.vel.x < 10) stopped = i;
+    }
+    expect(stopped).toBeGreaterThan(0);
+    expect(stopped).toBeLessThanOrEqual(3);
+  });
+
+  it('landing while holding a direction is back at run speed within 4 ticks', () => {
+    const s = createPlayerState(vec3(0, 40, 0));
+    s.vel = vec3(0, 0, -120);
+    let landedAt = -1;
+    let backAt = -1;
+    run(s, w, VALORANT, 64, cmd({ forward: 1 }), (p, i) => {
+      if (landedAt < 0 && p.onGround) landedAt = i;
+      if (landedAt >= 0 && backAt < 0 && lengthXZ(p.vel) >= MAX - 1e-6) backAt = i;
+    });
+    expect(landedAt).toBeGreaterThan(0);
+    expect(backAt - landedAt).toBeLessThanOrEqual(4);
+  });
+
+  it('still accelerates to full speed while crouch-walking (friction floor vs accelerate)', () => {
+    const s = standing();
+    s.ducked = true;
+    run(s, w, VALORANT, 64, cmd({ forward: 1, buttons: CROUCH | WALK }));
+    expect(lengthXZ(s.vel)).toBeCloseTo(MAX * VALORANT.walkSpeedScale * VALORANT.duckSpeedScale, 6);
+  });
+
+  it('walks and crouches at about half speed', () => {
+    const walk = run(standing(), w, VALORANT, 64, cmd({ forward: 1, buttons: WALK }));
+    expect(lengthXZ(walk.vel)).toBeCloseTo(MAX * 0.55, 6);
+    const duck = run(standing(), w, VALORANT, 96, cmd({ forward: 1, buttons: CROUCH }));
+    expect(duck.ducked).toBe(true);
+    expect(lengthXZ(duck.vel)).toBeCloseTo(MAX * 0.55, 6);
+  });
+
+  it('air control: holding forward turns the hop toward the view without changing speed', () => {
+    const empty = world();
+    const turnTo = 0.5; // 28.6 degrees left of the direction of travel
+    const fly = (cfg: MovementConfig, c: UserCmd): PlayerState => {
+      const s = createPlayerState(vec3(0, 200, 0));
+      s.vel = vec3(0, 0, -cfg.maxSpeed);
+      return run(s, empty, cfg, 32, c);
+    };
+    // the turn eases in as the velocity lines up with the view (rate ~ sin of the gap)
+    const steered = fly(VALORANT, cmd({ forward: 1, yaw: turnTo }));
+    expect(Math.abs(velocityYaw(steered.vel) - turnTo)).toBeLessThan(0.03);
+    expect(lengthXZ(steered.vel)).toBeCloseTo(VALORANT.maxSpeed, 6);
+
+    // no control: forward in the air does nothing once you're past the 30 u/s air cap
+    const plain = fly(GOLDSRC, cmd({ forward: 1, yaw: turnTo }));
+    expect(velocityYaw(plain.vel)).toBeCloseTo(0, 6);
+    // a strafe key held switches air control off: W+D at this yaw wishes 16 degrees
+    // off the motion, which is inside the air cap, so nothing turns the velocity
+    const strafed = fly(VALORANT, cmd({ forward: 1, side: 1, yaw: turnTo }));
+    expect(velocityYaw(strafed.vel)).toBeCloseTo(0, 6);
+    expect(lengthXZ(strafed.vel)).toBeCloseTo(VALORANT.maxSpeed, 6);
+    // a strafe key with the view tracking the motion is plain Quake air strafing,
+    // which still gains speed (the next jump clamps it back to run speed)
+    const strafer = createPlayerState(vec3(0, 200, 0));
+    strafer.vel = vec3(0, 0, -VALORANT.maxSpeed);
+    run(strafer, empty, VALORANT, 32, (_, p) => cmd({ side: 1, yaw: velocityYaw(p.vel) }));
+    expect(lengthXZ(strafer.vel)).toBeGreaterThan(VALORANT.maxSpeed + 30);
+    // looking more than 90 degrees away from the motion gets no steering this tick:
+    // only plain air acceleration (which brakes against the motion) acts
+    const behind = createPlayerState(vec3(0, 200, 0));
+    behind.vel = vec3(0, 0, -VALORANT.maxSpeed);
+    const behindPlain = clonePlayerState(behind);
+    stepPlayer(behind, cmd({ forward: 1, yaw: 2.5 }), VALORANT, empty, TICK_DT);
+    stepPlayer(behindPlain, cmd({ forward: 1, yaw: 2.5 }), { ...VALORANT, airControl: 0 }, empty, TICK_DT);
+    expect(behind.vel).toEqual(behindPlain.vel);
+  });
+
+  it('air control turns more than 90 degrees in half a second when the view leads the motion', () => {
+    const empty = world();
+    const s = createPlayerState(vec3(0, 200, 0));
+    s.vel = vec3(0, 0, -VALORANT.maxSpeed);
+    // keep looking ~35 degrees left of the current velocity, as a player steering a hop does
+    run(s, empty, VALORANT, 32, (_, p) => cmd({ forward: 1, yaw: velocityYaw(p.vel) + 0.6 }));
+    expect(velocityYaw(s.vel)).toBeGreaterThan(Math.PI / 2);
+    expect(lengthXZ(s.vel)).toBeCloseTo(VALORANT.maxSpeed, 6);
   });
 });
 
@@ -214,6 +341,20 @@ describe('air movement and jumping', () => {
     const { speed, jumps } = hop(CLASSROOM);
     expect(jumps).toBeGreaterThanOrEqual(4);
     expect(speed).toBeCloseTo(CLASSROOM.bhopCapFactor * CLASSROOM.maxSpeed, 6);
+  });
+
+  it('bhop holds run speed on valorant but never more', () => {
+    const { speed, jumps } = hop(VALORANT);
+    expect(jumps).toBeGreaterThanOrEqual(4);
+    expect(speed).toBeCloseTo(VALORANT.maxSpeed, 6);
+    // a hop that starts at run speed keeps all of it
+    const w = world(FLOOR);
+    let groundTicks = 0;
+    const s = run(standing(0, 0, vec3(0, 0, -VALORANT.maxSpeed)), w, VALORANT, 192, (_, p) => {
+      groundTicks = p.onGround ? groundTicks + 1 : 0;
+      return cmd({ buttons: groundTicks === 1 ? JUMP : 0 });
+    });
+    expect(lengthXZ(s.vel)).toBeCloseTo(VALORANT.maxSpeed, 6);
   });
 
   it('a buffered press just before landing still jumps (classroom)', () => {
@@ -422,7 +563,7 @@ describe('determinism', () => {
       snaps.push(s);
       return snaps;
     };
-    for (const cfg of [GOLDSRC, CLASSROOM]) {
+    for (const cfg of [VALORANT, GOLDSRC, CLASSROOM]) {
       const a = replay(cfg);
       const b = replay(cfg);
       expect(a).toStrictEqual(b);

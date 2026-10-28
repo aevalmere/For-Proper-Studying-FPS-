@@ -17,7 +17,7 @@ const BUTTON_BITS: [Action, number][] = [
 ];
 
 export class CmdBuilder {
-  opposingKeys: OpposingKeys = 'lastWins';
+  opposingKeys: OpposingKeys = 'cancel';
   weapon = 0;
 
   /** sources (key codes, mouse buttons) currently holding each action */

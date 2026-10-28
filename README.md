@@ -49,6 +49,11 @@ the presets in `packages/shared/src/movement/config.ts` or
 `packages/shared/src/weapons.ts`. Values that differ from the preset are
 highlighted.
 
+The Movement folder has three presets: `valorant` (default: run or stop with
+almost no ramp, A+D cancel out, bhops hold run speed but never gain it, holding W
+in the air steers the hop toward where you look), `goldsrc` (Half-Life / CS 1.6
+numbers, air strafing gains speed) and `classroom` (goldsrc with a bhop cap).
+
 Useful toggles: "show hitboxes" and "show spray pattern" (Shooting folder),
 volume and footsteps (Audio folder), render scale and adaptive resolution
 (Settings).

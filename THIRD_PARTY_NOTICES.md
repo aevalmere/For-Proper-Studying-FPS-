@@ -28,6 +28,12 @@ published Quake / Half-Life SDK algorithms (`PM_FlyMove`, `PM_WalkMove`,
 `PM_ClipVelocity`, `PM_CategorizePosition`, `PM_Duck`, `PM_PreventMegaBunnyJumping`) on
 top of this project's own `traceBox`. No Quake or Half-Life source code was copied.
 
+The optional air control (`MovementConfig.airControl`) follows the CPMA
+`pm_aircontrol` formula as it is widely published in GPL Quake-derived games
+(Xonotic, Warsow): turn the horizontal velocity toward the wish direction by
+`32 * aircontrol * dot^2 * dt` and renormalize to the old speed. It is a fresh
+implementation of that formula, not copied code.
+
 ### License
 
 The repository-root `LICENSE` file reads as follows. The copy shipped inside the addon

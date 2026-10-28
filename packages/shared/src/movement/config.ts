@@ -28,6 +28,13 @@ export interface MovementConfig {
   airAccelerate: number;
   /** cap on the wish speed air acceleration works toward (30 in every id/Valve engine) */
   airSpeedCap: number;
+  /**
+   * CPM-style air control (Quake 3 CPMA pm_aircontrol): holding only forward or back
+   * in the air turns the horizontal velocity toward where you look, without changing
+   * speed, so a bhopper steers with the mouse. 0 = off; strafe keys always use plain
+   * air acceleration instead.
+   */
+  airControl: number;
   /** sv_maxvelocity: per-axis velocity clamp (0 = off) */
   maxVelocity: number;
 
@@ -72,7 +79,7 @@ export interface MovementConfig {
   minGroundNormal: number;
 }
 
-export type MovementPresetName = 'goldsrc' | 'classroom';
+export type MovementPresetName = 'valorant' | 'goldsrc' | 'classroom';
 
 /** Half-Life / CS 1.6 feel. Values from SUCC goldsrc.tres (metres * 39.37). */
 const GOLDSRC: MovementConfig = {
@@ -85,6 +92,7 @@ const GOLDSRC: MovementConfig = {
 
   airAccelerate: 10, // air_acceleration 10
   airSpeedCap: 30, // max_air_speed 0.762002 m/s
+  airControl: 0, // not a GoldSrc mechanic
   maxVelocity: 2000, // max_velocity 50.800102 m/s, enforce_max_velocity true
 
   gravity: 800, // gravity 20.320041 m/s^2
@@ -125,7 +133,44 @@ const CLASSROOM: MovementConfig = {
   bhopCapCrop: 1,
 };
 
+/**
+ * Valorant-style feel on the same engine: you are either running or stopped.
+ * Friction fights acceleration every ground tick, so with these numbers a standing
+ * start reaches run speed in 3 ticks (0.05 s), a released key stops you in 6
+ * (0.1 s: proportional friction down to stopSpeed, then a 2000 u/s^2 floor), and the
+ * opposite key stops you in 2. No edge friction. Jumping clamps horizontal speed to
+ * run speed, so bhop chains hold speed but never gain it, and holding W in the air
+ * steers the hop toward the view (airControl: up to ~200 deg/s at run speed). Run
+ * speed is Valorant's ~6.75 m/s in Quake units; walk and crouch are about half of
+ * it. Jump height, gravity, hulls and step size stay on the goldsrc numbers so the
+ * arena's ledges and stairs behave the same.
+ *
+ * Keep accelerate * (maxSpeed * walkSpeedScale * duckSpeedScale) comfortably above
+ * friction * stopSpeed: below that, friction's fixed floor outruns acceleration and a
+ * crouch-walking player cannot speed up at all (here 2414 vs 2000).
+ */
+const VALORANT: MovementConfig = {
+  ...GOLDSRC,
+  maxSpeed: 266,
+  accelerate: 30,
+  friction: 20,
+  stopSpeed: 100,
+  edgeFriction: 1,
+  walkSpeedScale: 0.55,
+
+  airControl: 80,
+
+  jumpBufferTime: 0.1,
+  bhopCapFactor: 1,
+  bhopCapCrop: 1,
+
+  duckSpeedScale: 0.55,
+  duckTime: 0.25,
+};
+
+/** The first preset is the default the client starts on. */
 export const MOVEMENT_PRESETS: Record<MovementPresetName, MovementConfig> = {
+  valorant: VALORANT,
   goldsrc: GOLDSRC,
   classroom: CLASSROOM,
 };
@@ -141,13 +186,14 @@ export interface TunableMeta {
 export const MOVEMENT_CONFIG_META: Record<keyof MovementConfig, TunableMeta> = {
   maxSpeed: { min: 50, max: 1000, step: 1, label: 'max speed (u/s)' },
   accelerate: { min: 0, max: 100, step: 0.1, label: 'ground accelerate' },
-  friction: { min: 0, max: 20, step: 0.1, label: 'friction' },
+  friction: { min: 0, max: 40, step: 0.1, label: 'friction' },
   stopSpeed: { min: 0, max: 400, step: 1, label: 'stop speed (u/s)' },
   edgeFriction: { min: 1, max: 10, step: 0.1, label: 'edge friction (x, 1 = off)' },
   walkSpeedScale: { min: 0.1, max: 1, step: 0.01, label: 'walk speed (x max)' },
 
   airAccelerate: { min: 0, max: 1000, step: 0.1, label: 'air accelerate' },
   airSpeedCap: { min: 0, max: 1000, step: 1, label: 'air wish speed cap (u/s)' },
+  airControl: { min: 0, max: 300, step: 1, label: 'air control (W steers, 0 = off)' },
   maxVelocity: { min: 0, max: 10000, step: 10, label: 'max velocity per axis (0 = off)' },
 
   gravity: { min: 0, max: 3000, step: 1, label: 'gravity (u/s²)' },

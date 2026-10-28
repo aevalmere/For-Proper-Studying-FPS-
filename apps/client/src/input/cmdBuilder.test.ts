@@ -33,6 +33,7 @@ describe('CmdBuilder', () => {
 
   it('last pressed wins on opposite keys, and falls back when it is released', () => {
     const b = new CmdBuilder();
+    b.opposingKeys = 'lastWins';
     b.press('right', 'KeyD');
     expect(sample(b).side).toBe(1);
     b.press('left', 'KeyA');
@@ -41,16 +42,22 @@ describe('CmdBuilder', () => {
     expect(sample(b).side).toBe(1);
   });
 
-  it('cancels opposite keys in cancel mode', () => {
+  it('cancels opposite keys by default, until one is released', () => {
     const b = new CmdBuilder();
-    b.opposingKeys = 'cancel';
+    expect(b.opposingKeys).toBe('cancel');
     b.press('forward', 'KeyW');
     b.press('back', 'KeyS');
     expect(sample(b).forward).toBe(0);
+    b.press('left', 'KeyA');
+    b.press('right', 'KeyD');
+    expect(sample(b).side).toBe(0);
+    b.release('right', 'KeyD');
+    expect(sample(b).side).toBe(-1);
   });
 
   it('a tapped counter-strafe key wins for one tick while the other is held', () => {
     const b = new CmdBuilder();
+    b.opposingKeys = 'lastWins';
     b.press('right', 'KeyD');
     sample(b);
     b.press('left', 'KeyA');
