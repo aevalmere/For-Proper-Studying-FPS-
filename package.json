@@ -1,0 +1,7 @@
+{
+  "name": "fps-local-preview",
+  "private": true,
+  "scripts": {
+    "dev": "vite preview apps/client --host 127.0.0.1 --port 5173 --strictPort"
+  }
+}
